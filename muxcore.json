@@ -1,0 +1,11 @@
+{
+  "name": "Local Auth",
+  "description": "Local accounts and API token authentication provider for MuxCore.",
+  "version": "1.0.0",
+  "icon": "",
+  "author": "MuxCore",
+  "kind": "auth",
+  "capabilities": ["auth.local", "auth.api-tokens"],
+  "dependencies": [],
+  "homepage": "https://github.com/Muxcore-Media/auth-local"
+}
