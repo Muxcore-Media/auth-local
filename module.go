@@ -25,7 +25,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 		ID:           "auth-local",
 		Name:         "Local Auth",
 		Version:      "1.0.0",
-		Kind:         contracts.ModuleKindAuth,
+		Kinds:        []contracts.ModuleKind{contracts.ModuleKindAuth},
 		Description:  "Local accounts and API token authentication",
 		Author:       "MuxCore",
 		Capabilities: []string{"auth.local", "auth.api-tokens"},
