@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Muxcore-Media/core/internal/auth"
+	"github.com/Muxcore-Media/auth-local"
 )
 
 func TestCreateAccountAndAuthenticate(t *testing.T) {

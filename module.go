@@ -37,6 +37,20 @@ func (m *Module) Start(ctx context.Context) error  { return nil }
 func (m *Module) Stop(ctx context.Context) error   { return nil }
 func (m *Module) Health(ctx context.Context) error { return nil }
 
+func (m *Module) Settings() []contracts.SettingDef {
+	return []contracts.SettingDef{
+		{
+			Key:         "MUXCORE_AUTH_LOCAL_TOKEN_SECRET",
+			Label:       "Token Secret",
+			Type:        contracts.SettingTypeSecret,
+			Default:     "",
+			Description: "Secret key for signing API tokens",
+			Required:    true,
+			Group:       "Security",
+		},
+	}
+}
+
 func (m *Module) Authenticate(ctx context.Context, credentials any) (contracts.Session, error) {
 	cred, ok := credentials.(Credentials)
 	if !ok {
