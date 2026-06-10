@@ -7,11 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
-	_ "modernc.org/sqlite" // sqlite driver registration
+	_ "modernc.org/sqlite"
 )
 
 const bcryptCost = 12
@@ -154,10 +155,12 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 	if err := row.Scan(&u.ID, &u.Username, &u.Password, &rolesJSON, &totpSecret, &totpEnabled, &createdAtStr); err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
-	json.Unmarshal([]byte(rolesJSON), &u.Roles)
+	if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
+		slog.Warn("corrupt roles data for user", "user_id", u.ID, "error", err)
+	}
 	u.TOTPSecret = totpSecret
 	u.TOTPEnabled = totpEnabled == 1
-	u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
+	u.CreatedAt = parseTime(createdAtStr)
 	return &u, nil
 }
 
@@ -172,10 +175,12 @@ func (s *Store) GetUser(id string) (*User, error) {
 	if err := row.Scan(&u.ID, &u.Username, &u.Password, &rolesJSON, &totpSecret, &totpEnabled, &createdAtStr); err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
-	json.Unmarshal([]byte(rolesJSON), &u.Roles)
+	if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
+		slog.Warn("corrupt roles data for user", "user_id", u.ID, "error", err)
+	}
 	u.TOTPSecret = totpSecret
 	u.TOTPEnabled = totpEnabled == 1
-	u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
+	u.CreatedAt = parseTime(createdAtStr)
 	return &u, nil
 }
 
@@ -193,8 +198,10 @@ func (s *Store) ListUsers() ([]*User, error) {
 		if err := rows.Scan(&u.ID, &u.Username, &rolesJSON, &createdAtStr); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(rolesJSON), &u.Roles)
-		u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
+		if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
+			slog.Warn("corrupt roles data for user", "user_id", u.ID, "error", err)
+		}
+		u.CreatedAt = parseTime(createdAtStr)
 		users = append(users, &u)
 	}
 	return users, nil
@@ -283,8 +290,7 @@ func (s *Store) GetSession(token string) (*Session, error) {
 	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Kind, &expiresAt); err != nil {
 		return nil, fmt.Errorf("session not found")
 	}
-	sess.ExpiresAt, _ = time.Parse("2006-01-02 15:04:05", expiresAt)
-	// Also try RFC3339 for legacy entries.
+	sess.ExpiresAt = parseTime(expiresAt)
 	if sess.ExpiresAt.IsZero() {
 		sess.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt)
 	}
@@ -338,4 +344,18 @@ func newID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// parseTime parses a SQLite datetime string with the format used by
+// datetime('now') and RFC3339. Returns zero time on parse failure.
+func parseTime(s string) time.Time {
+	t, err := time.Parse("2006-01-02 15:04:05", s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, s)
+		if err != nil {
+			slog.Warn("failed to parse timestamp", "value", s, "error", err)
+			return time.Time{}
+		}
+	}
+	return t
 }
