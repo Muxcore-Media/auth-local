@@ -28,11 +28,14 @@
 - [ ] Login flow: password → partial → TOTP → full session
 - [ ] Admin CLI: totp enable/disable/status
 
-### Phase 4: Passkey / WebAuthn
-- [ ] WebAuthn RP configuration
-- [ ] Credential registration (begin + complete)
-- [ ] Passwordless authentication (begin + complete)
-- [ ] 2FA authentication (password → partial → passkey → full)
+### Phase 4: Passkey / WebAuthn ✅
+- [x] WebAuthn dependency (go-webauthn v0.17)
+- [x] Credential storage in SQLite (webauthn_credentials table)
+- [x] WebAuthn session store (webauthn_sessions table)
+- [x] Registration: begin (challenge) + complete (verify)
+- [x] Passwordless login: begin (challenge) + complete (verify assertion)
+- [x] HTTP server on separate port for browser-facing WebAuthn endpoints
+- [x] RP configuration via CLI flags
 
 ### Phase 5: RBAC + IdentityProvider
 - [x] Embedded RBAC in server (admin/manager/user/viewer)

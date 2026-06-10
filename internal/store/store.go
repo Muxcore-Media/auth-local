@@ -108,6 +108,12 @@ func (s *Store) migrate() error {
 			verified_at TEXT DEFAULT '',
 			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+		`CREATE TABLE IF NOT EXISTS webauthn_sessions (
+			challenge   TEXT PRIMARY KEY,
+			user_id     TEXT NOT NULL,
+			data        BLOB NOT NULL,
+			expires_at  TEXT NOT NULL
+		)`,
 	}
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
@@ -366,10 +372,90 @@ func (s *Store) DisableTOTP(userID string) error {
 	return err
 }
 
+// --- WebAuthn ---
+
+type WebAuthnSessionData struct {
+	Challenge   string    `json:"challenge"`
+	UserID      string    `json:"user_id"`
+	AllowedCreds [][]byte `json:"allowed_creds"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	RelyingPartyID string `json:"rp_id"`
+	UserVerification string `json:"user_verification"`
+}
+
+func (s *Store) SaveWebAuthnSession(userID, challenge string, data []byte) error {
+	_, err := s.db.Exec(
+		`INSERT INTO webauthn_sessions (challenge, user_id, data, expires_at) VALUES (?, ?, ?, datetime('now', '+5 minutes'))
+		 ON CONFLICT(challenge) DO UPDATE SET data = excluded.data`,
+		challenge, userID, data,
+	)
+	return err
+}
+
+func (s *Store) GetWebAuthnSession(challenge string) ([]byte, error) {
+	row := s.db.QueryRow(
+		`SELECT data FROM webauthn_sessions WHERE challenge = ? AND expires_at > datetime('now')`,
+		challenge,
+	)
+	var data []byte
+	if err := row.Scan(&data); err != nil {
+		return nil, fmt.Errorf("webauthn session not found or expired")
+	}
+	return data, nil
+}
+
+func (s *Store) DeleteWebAuthnSession(challenge string) error {
+	_, err := s.db.Exec(`DELETE FROM webauthn_sessions WHERE challenge = ?`, challenge)
+	return err
+}
+
+func (s *Store) AddWebAuthnCredential(userID string, data []byte) error {
+	// Generate a unique ID for the credential row using SHA-256 of the data.
+	id := sha256.Sum256(data)
+	_, err := s.db.Exec(
+		`INSERT INTO webauthn_credentials (id, user_id, public_key, created_at) VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(id) DO NOTHING`,
+		hex.EncodeToString(id[:]), userID, data,
+	)
+	return err
+}
+
+func (s *Store) ListWebAuthnCredentials(userID string) ([][]byte, error) {
+	rows, err := s.db.Query(`SELECT public_key FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var creds [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		creds = append(creds, data)
+	}
+	return creds, nil
+}
+
+func (s *Store) DeleteWebAuthnCredential(userID, credentialID string) error {
+	_, err := s.db.Exec(`DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?`, credentialID, userID)
+	return err
+}
+
+func (s *Store) DeleteAllWebAuthnCredentials(userID string) error {
+	_, err := s.db.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, userID)
+	return err
+}
+
 // --- Cleanup ---
 
 func (s *Store) CleanupExpiredSessions() error {
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < datetime('now')`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`DELETE FROM webauthn_sessions WHERE expires_at < datetime('now')`)
 	return err
 }
 
