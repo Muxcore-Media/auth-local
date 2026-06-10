@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/server"
 	"github.com/Muxcore-Media/auth-local/internal/store"
 	"github.com/Muxcore-Media/auth-local/internal/webauthn"
@@ -31,6 +32,7 @@ func main() {
 	rpID := flag.String("webauthn-rp-id", "localhost", "WebAuthn relying party ID (domain)")
 	rpOrigin := flag.String("webauthn-rp-origin", "http://localhost:8080", "WebAuthn relying party origin")
 	rpName := flag.String("webauthn-rp-name", "MuxCore", "WebAuthn relying party display name")
+	policyFile := flag.String("policy-file", "", "Path to RBAC policy YAML file")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -49,6 +51,20 @@ func main() {
 	}
 	defer st.Close()
 
+	// Load RBAC policy if specified.
+	var pol *policy.Policy
+	if *policyFile != "" {
+		p, err := policy.Load(*policyFile)
+		if err != nil {
+			slog.Error("failed to load RBAC policy", "file", *policyFile, "error", err)
+			os.Exit(1)
+		}
+		pol = p
+		slog.Info("RBAC policy loaded", "file", *policyFile)
+	} else {
+		slog.Info("no RBAC policy file specified — using built-in roles (admin/manager/user/viewer)")
+	}
+
 	// Start gRPC server.
 	grpcLis, err := net.Listen("tcp", *grpcAddr)
 	if err != nil {
@@ -56,7 +72,7 @@ func main() {
 		os.Exit(1)
 	}
 	grpcSrv := grpc.NewServer()
-	authSrv := server.New(st)
+	authSrv := server.New(st, pol)
 	authSrv.RegisterWithGRPC(grpcSrv)
 	go func() {
 		slog.Info("gRPC AuthService listening", "addr", *grpcAddr)

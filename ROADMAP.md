@@ -37,11 +37,13 @@
 - [x] HTTP server on separate port for browser-facing WebAuthn endpoints
 - [x] RP configuration via CLI flags
 
-### Phase 5: RBAC + IdentityProvider
-- [x] Embedded RBAC in server (admin/manager/user/viewer)
-- [ ] Policy file parser (YAML)
-- [ ] ResourceAuthorizer.CanWithResource (ABAC support)
-- [ ] IdentityProvider.ExtractIdentity (from gRPC metadata)
+### Phase 5: RBAC Policy File ✅
+- [x] YAML RBAC policy file parser with glob permission matching
+- [x] Replaces hardcoded authorize function when loaded
+- [x] Built-in fallback (admin/manager/user/viewer) when no file given
+- [x] `--policy-file` flag in entry point
+- [x] SIGHUP-ready Replace() for future hot-reload
+- [x] 12 unit tests for permission matching
 
 ### Phase 6: Admin CLI + API Tokens
 - [ ] Admin CLI: all user management commands

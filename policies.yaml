@@ -1,0 +1,26 @@
+# auth-local RBAC Policy
+#
+# Permission matching:
+#   "*"            — superuser (all actions on all resources)
+#   "resource.*"   — all actions on a resource (e.g., "media.*")
+#   "resource.action" — specific action (e.g., "media.view")
+#   "*.action"     — specific action on any resource
+
+roles:
+  admin:
+    permissions: ["*"]
+  manager:
+    permissions:
+      - "media.*"
+      - "storage.*"
+      - "modules.read"
+      - "modules.manage"
+  user:
+    permissions:
+      - "media.request"
+      - "media.view"
+      - "media.search"
+  viewer:
+    permissions:
+      - "media.view"
+      - "media.search"

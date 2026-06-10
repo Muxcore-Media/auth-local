@@ -21,7 +21,7 @@ func newTestServer(t *testing.T) *AuthServer {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s)
+	return New(s, nil)
 }
 
 func TestAuthenticate_Password(t *testing.T) {

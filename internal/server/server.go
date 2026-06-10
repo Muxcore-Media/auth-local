@@ -14,6 +14,7 @@ import (
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
+	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -22,11 +23,12 @@ const issuerName = "MuxCore"
 // AuthServer implements the AuthService gRPC server.
 type AuthServer struct {
 	authv1.UnimplementedAuthServiceServer
-	store *store.Store
+	store  *store.Store
+	policy *policy.Policy
 }
 
-func New(s *store.Store) *AuthServer {
-	return &AuthServer{store: s}
+func New(s *store.Store, p *policy.Policy) *AuthServer {
+	return &AuthServer{store: s, policy: p}
 }
 
 func (s *AuthServer) RegisterWithGRPC(srv *grpc.Server) {
@@ -198,7 +200,13 @@ func (s *AuthServer) Can(ctx context.Context, req *authv1.CanRequest) (*authv1.C
 		return &authv1.CanResponse{Allowed: false, Reason: "user not found"}, nil
 	}
 
-	allowed, reason := authorize(user.Roles, req.Action, req.Resource)
+	var allowed bool
+	var reason string
+	if s.policy != nil {
+		allowed, reason = s.policy.IsAllowed(user.Roles, req.Action, req.Resource)
+	} else {
+		allowed, reason = authorizeBuiltin(user.Roles, req.Action, req.Resource)
+	}
 	return &authv1.CanResponse{Allowed: allowed, Reason: reason}, nil
 }
 
@@ -297,7 +305,7 @@ func (s *AuthServer) VerifyTOTPSetup(ctx context.Context, req *authv1.VerifyTOTP
 	return &authv1.VerifyTOTPSetupResponse{Verified: true}, nil
 }
 
-func authorize(roles []string, action, resource string) (bool, string) {
+func authorizeBuiltin(roles []string, action, resource string) (bool, string) {
 	for _, role := range roles {
 		switch role {
 		case "admin":
