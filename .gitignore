@@ -1,0 +1,17 @@
+# Build artifacts
+/auth-local
+/cmd/module/module
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Auth data (local user DB)
+*.db
+*.db-journal
+*.db-wal
