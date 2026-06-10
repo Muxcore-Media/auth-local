@@ -536,6 +536,13 @@ func (s *Store) DeleteAllWebAuthnCredentials(userID string) error {
 	return err
 }
 
+// SessionCount returns the number of active (non-expired) sessions.
+func (s *Store) SessionCount() int {
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE expires_at > datetime('now')`).Scan(&count)
+	return count
+}
+
 // --- Cleanup ---
 
 func (s *Store) CleanupExpiredSessions() error {

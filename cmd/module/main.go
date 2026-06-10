@@ -92,9 +92,15 @@ func main() {
 		slog.Error("failed to listen", "addr", *httpAddr, "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		slog.Info("HTTP API listening for WebAuthn", "addr", *httpAddr)
-		if err := http.Serve(httpLis, w.Mux()); err != nil {
+		go func() {
+			// Wrap WebAuthn mux with /metrics handler.
+			mux := w.Mux()
+			mux.HandleFunc("/metrics", func(wr http.ResponseWriter, r *http.Request) {
+				wr.Header().Set("Content-Type", "text/plain; version=0.0.4")
+				wr.Write([]byte(authSrv.Metrics()))
+			})
+			slog.Info("HTTP API listening for WebAuthn", "addr", *httpAddr)
+			if err := http.Serve(httpLis, mux); err != nil {
 			slog.Error("HTTP server error", "error", err)
 		}
 	}()

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pquerna/otp/totp"
@@ -24,8 +26,27 @@ const issuerName = "MuxCore"
 // AuthServer implements the AuthService gRPC server.
 type AuthServer struct {
 	authv1.UnimplementedAuthServiceServer
-	store  *store.Store
-	policy *policy.Policy
+	store        *store.Store
+	policy       *policy.Policy
+	loginSuccess atomic.Int64
+	loginFailed  atomic.Int64
+}
+
+// Metrics returns Prometheus-format metrics.
+func (s *AuthServer) Metrics() string {
+	var b strings.Builder
+	b.WriteString("# HELP auth_login_success_total Successful logins\n")
+	b.WriteString("# TYPE auth_login_success_total counter\n")
+	fmt.Fprintf(&b, "auth_login_success_total %d\n", s.loginSuccess.Load())
+	b.WriteString("# HELP auth_login_failed_total Failed login attempts\n")
+	b.WriteString("# TYPE auth_login_failed_total counter\n")
+	fmt.Fprintf(&b, "auth_login_failed_total %d\n", s.loginFailed.Load())
+	if s.store != nil {
+		b.WriteString("# HELP auth_sessions_active Current active sessions\n")
+		b.WriteString("# TYPE auth_sessions_active gauge\n")
+		fmt.Fprintf(&b, "auth_sessions_active %d\n", s.store.SessionCount())
+	}
+	return b.String()
 }
 
 func New(s *store.Store, p *policy.Policy) *AuthServer {
@@ -74,6 +95,7 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 	user, err := s.store.VerifyPassword(creds.Username, creds.Password)
 	if err != nil {
 		slog.Warn("auth: password verification failed", "username", creds.Username)
+		s.loginFailed.Add(1)
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
 			Error:         "invalid username or password",
@@ -101,7 +123,7 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 	if err != nil {
 		return nil, status.Error(codes.Internal, "create session failed")
 	}
-
+	s.loginSuccess.Add(1)
 	return &authv1.AuthenticateResponse{
 		Authenticated: true,
 		SessionToken:  sess.Token,
@@ -154,6 +176,7 @@ func (s *AuthServer) authTOTP(req *authv1.AuthenticateRequest) (*authv1.Authenti
 	}
 	if !totp.Validate(creds.TOTPCode, secret) {
 		slog.Warn("auth: invalid TOTP code", "user_id", partialSess.UserID)
+		s.loginFailed.Add(1)
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
 			Error:         "invalid TOTP code",
@@ -165,7 +188,7 @@ func (s *AuthServer) authTOTP(req *authv1.AuthenticateRequest) (*authv1.Authenti
 	if err != nil {
 		return nil, status.Error(codes.Internal, "upgrade session failed")
 	}
-
+	s.loginSuccess.Add(1)
 	user, err := s.store.GetUser(fullSess.UserID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "lookup user")
@@ -191,6 +214,7 @@ func (s *AuthServer) authAPIKey(req *authv1.AuthenticateRequest) (*authv1.Authen
 	token, err := s.store.ValidateAPIToken(creds.Key)
 	if err != nil {
 		slog.Warn("auth: invalid API key")
+		s.loginFailed.Add(1)
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
 			Error:         "invalid API key",
@@ -205,6 +229,7 @@ func (s *AuthServer) authAPIKey(req *authv1.AuthenticateRequest) (*authv1.Authen
 		}, nil
 	}
 
+	s.loginSuccess.Add(1)
 	return &authv1.AuthenticateResponse{
 		Authenticated: true,
 		SessionToken:  token.Token,
