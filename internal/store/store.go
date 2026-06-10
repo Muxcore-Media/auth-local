@@ -101,6 +101,13 @@ func (s *Store) migrate() error {
 			last_used  TEXT DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id)`,
+		`CREATE TABLE IF NOT EXISTS totp (
+			user_id     TEXT PRIMARY KEY REFERENCES users(id),
+			secret      TEXT NOT NULL,
+			enabled     INTEGER NOT NULL DEFAULT 1,
+			verified_at TEXT DEFAULT '',
+			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
@@ -322,6 +329,41 @@ func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
 	// Delete the partial session, create a full one.
 	s.db.Exec(`DELETE FROM sessions WHERE token = ?`, partialToken)
 	return s.CreateFullSession(sess.UserID)
+}
+
+// --- TOTP ---
+
+func (s *Store) SetTOTPSecret(userID, secret string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO totp (user_id, secret, enabled, created_at) VALUES (?, ?, 1, datetime('now'))`,
+		userID, secret,
+	)
+	return err
+}
+
+func (s *Store) GetTOTPSecret(userID string) (string, bool, error) {
+	row := s.db.QueryRow(`SELECT secret, enabled FROM totp WHERE user_id = ?`, userID)
+	var secret string
+	var enabled int
+	if err := row.Scan(&secret, &enabled); err != nil {
+		return "", false, nil // not found = not enabled
+	}
+	return secret, enabled == 1, nil
+}
+
+func (s *Store) VerifyTOTPSetup(userID string) error {
+	_, err := s.db.Exec(`UPDATE totp SET verified_at = datetime('now') WHERE user_id = ?`, userID)
+	return err
+}
+
+func (s *Store) DisableTOTP(userID string) error {
+	_, err := s.db.Exec(`DELETE FROM totp WHERE user_id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	// Also update the users table flag for quick checks.
+	_, err = s.db.Exec(`UPDATE users SET totp_secret = '', totp_enabled = 0 WHERE id = ?`, userID)
+	return err
 }
 
 // --- Cleanup ---

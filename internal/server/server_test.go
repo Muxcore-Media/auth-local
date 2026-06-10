@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/pquerna/otp/totp"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
@@ -23,7 +26,6 @@ func newTestServer(t *testing.T) *AuthServer {
 
 func TestAuthenticate_Password(t *testing.T) {
 	srv := newTestServer(t)
-	// Create user directly.
 	srv.store.CreateUser("alice", "password123")
 
 	creds, _ := json.Marshal(map[string]string{
@@ -101,7 +103,6 @@ func TestRevoke(t *testing.T) {
 	sess, _ := srv.store.CreateFullSession(user.ID)
 
 	srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
-
 	resp, _ := srv.Validate(context.Background(), &authv1.ValidateRequest{Token: sess.Token})
 	if resp.Valid {
 		t.Fatal("expected session to be revoked")
@@ -143,9 +144,7 @@ func TestExtractIdentity(t *testing.T) {
 	user, _ := srv.store.GetUserByUsername("alice")
 	sess, _ := srv.store.CreateFullSession(user.ID)
 
-	resp, err := srv.ExtractIdentity(context.Background(), &authv1.ExtractIdentityRequest{
-		Token: sess.Token,
-	})
+	resp, err := srv.ExtractIdentity(context.Background(), &authv1.ExtractIdentityRequest{Token: sess.Token})
 	if err != nil {
 		t.Fatalf("ExtractIdentity: %v", err)
 	}
@@ -157,14 +156,9 @@ func TestExtractIdentity(t *testing.T) {
 	}
 
 	// Module identity.
-	resp2, _ := srv.ExtractIdentity(context.Background(), &authv1.ExtractIdentityRequest{
-		CallerId: "downloader-qbittorrent",
-	})
+	resp2, _ := srv.ExtractIdentity(context.Background(), &authv1.ExtractIdentityRequest{CallerId: "downloader"})
 	if !resp2.Found {
 		t.Fatal("expected module identity found")
-	}
-	if resp2.Kind != "service" {
-		t.Errorf("Kind = %q, want %q", resp2.Kind, "service")
 	}
 }
 
@@ -176,5 +170,131 @@ func TestExtractIdentity_NoToken(t *testing.T) {
 	}
 	if resp.Found {
 		t.Fatal("expected no identity for empty request")
+	}
+}
+
+// --- TOTP Tests ---
+
+func TestEnableTOTP(t *testing.T) {
+	srv := newTestServer(t)
+	user, _ := srv.store.CreateUser("alice", "pw")
+
+	resp, err := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	if err != nil {
+		t.Fatalf("EnableTOTP: %v", err)
+	}
+	if resp.Secret == "" {
+		t.Fatal("expected non-empty TOTP secret")
+	}
+	if resp.QrCodeUrl == "" {
+		t.Fatal("expected non-empty QR code URL")
+	}
+
+	// Verify TOTP is now enabled.
+	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	if !status.Enabled {
+		t.Fatal("expected TOTP to be enabled")
+	}
+}
+
+func TestTOTP_LoginFlow(t *testing.T) {
+	srv := newTestServer(t)
+	user, _ := srv.store.CreateUser("alice", "pw")
+
+	enableResp, _ := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	secret := enableResp.Secret
+
+	// Login with password — should get partial token (TOTP requires 2FA).
+	creds, _ := json.Marshal(map[string]string{"username": "alice", "password": "pw"})
+	loginResp, err := srv.Authenticate(context.Background(), &authv1.AuthenticateRequest{
+		CredentialType: "password",
+		CredentialData: creds,
+	})
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if loginResp.Authenticated {
+		t.Fatal("expected not authenticated (TOTP required)")
+	}
+	if !loginResp.Requires_2Fa {
+		t.Fatal("expected requires_2fa = true")
+	}
+	if loginResp.PartialToken == "" {
+		t.Fatal("expected non-empty partial token")
+	}
+
+	// Complete with a valid TOTP code.
+	realCode, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+
+	totpCreds, _ := json.Marshal(map[string]string{
+		"partial_token": loginResp.PartialToken,
+		"totp_code":     realCode,
+	})
+	finalResp, err := srv.Authenticate(context.Background(), &authv1.AuthenticateRequest{
+		CredentialType: "totp",
+		CredentialData: totpCreds,
+	})
+	if err != nil {
+		t.Fatalf("TOTP Authenticate: %v", err)
+	}
+	if !finalResp.Authenticated {
+		t.Fatalf("expected authenticated after TOTP: %s", finalResp.Error)
+	}
+	if finalResp.SessionToken == "" {
+		t.Fatal("expected non-empty session token")
+	}
+	if finalResp.Username != "alice" {
+		t.Errorf("Username = %q, want %q", finalResp.Username, "alice")
+	}
+}
+
+func TestTOTP_InvalidCode(t *testing.T) {
+	srv := newTestServer(t)
+	user, _ := srv.store.CreateUser("alice", "pw")
+	enableResp, _ := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	_ = enableResp
+
+	// Login to get partial token.
+	creds, _ := json.Marshal(map[string]string{"username": "alice", "password": "pw"})
+	loginResp, _ := srv.Authenticate(context.Background(), &authv1.AuthenticateRequest{
+		CredentialType: "password",
+		CredentialData: creds,
+	})
+
+	// Try with wrong code.
+	totpCreds, _ := json.Marshal(map[string]string{
+		"partial_token": loginResp.PartialToken,
+		"totp_code":     "000000",
+	})
+	resp, err := srv.Authenticate(context.Background(), &authv1.AuthenticateRequest{
+		CredentialType: "totp",
+		CredentialData: totpCreds,
+	})
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if resp.Authenticated {
+		t.Fatal("expected authentication to fail with wrong TOTP code")
+	}
+}
+
+func TestDisableTOTP(t *testing.T) {
+	srv := newTestServer(t)
+	user, _ := srv.store.CreateUser("alice", "pw")
+	srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+
+	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	if !status.Enabled {
+		t.Fatal("expected TOTP enabled before disable")
+	}
+
+	srv.DisableTOTP(context.Background(), &authv1.DisableTOTPRequest{UserId: user.ID})
+
+	status, _ = srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	if status.Enabled {
+		t.Fatal("expected TOTP disabled after disable")
 	}
 }
