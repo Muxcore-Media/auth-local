@@ -393,9 +393,8 @@ func (s *Store) GetSession(token string) (*Session, error) {
 	}
 	sess.ExpiresAt = parseTime(expiresAt)
 	if sess.ExpiresAt.IsZero() {
-		sess.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt)
-	}
-	if time.Now().After(sess.ExpiresAt) {
+		// If parseTime couldn't parse it, treat as expired immediately.
+		slog.Warn("session has unparseable expiration, treating as expired", "token", sess.Token[:8])
 		s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
