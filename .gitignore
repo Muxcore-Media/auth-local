@@ -1,6 +1,7 @@
 # Build artifacts
 /auth-local
 /authctl
+/module
 /cmd/module/module
 /cmd/authctl/authctl
 

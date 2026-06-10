@@ -48,6 +48,9 @@ func (h *Handler) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/webauthn/register/complete", h.completeRegistration)
 	mux.HandleFunc("/api/webauthn/login/begin", h.beginLogin)
 	mux.HandleFunc("/api/webauthn/login/complete", h.completeLogin)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 	return mux
 }
 
