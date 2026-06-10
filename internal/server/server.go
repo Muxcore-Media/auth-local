@@ -36,6 +36,16 @@ func (s *AuthServer) RegisterWithGRPC(srv *grpc.Server) {
 	authv1.RegisterAuthServiceServer(srv, s)
 }
 
+// SetPolicy replaces the RBAC policy at runtime. Used for SIGHUP reload.
+func (s *AuthServer) SetPolicy(p *policy.Policy) {
+	if s.policy != nil {
+		s.policy.Replace(p)
+	} else {
+		s.policy = p
+	}
+	slog.Info("RBAC policy reloaded")
+}
+
 func (s *AuthServer) Authenticate(ctx context.Context, req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
 	switch req.CredentialType {
 	case "password":

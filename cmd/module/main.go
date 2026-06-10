@@ -149,6 +149,23 @@ func main() {
 		}
 	}()
 
+	// SIGHUP reload for RBAC policy.
+	if *policyFile != "" {
+		sighupCh := make(chan os.Signal, 1)
+		signal.Notify(sighupCh, syscall.SIGHUP)
+		go func() {
+			for range sighupCh {
+				slog.Info("SIGHUP received — reloading RBAC policy")
+				newPol, err := policy.Load(*policyFile)
+				if err != nil {
+					slog.Error("policy reload failed", "error", err)
+					continue
+				}
+				authSrv.SetPolicy(newPol)
+			}
+		}()
+	}
+
 	// Wait for shutdown signal.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
