@@ -257,6 +257,94 @@ func (s *Store) SetRoles(id string, roles []string) error {
 	return err
 }
 
+// --- API Tokens ---
+
+type APITokenInfo struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Prefix    string   `json:"prefix"`
+	Scopes    []string `json:"scopes"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (s *Store) CreateAPIToken(userID, name string, scopes []string) (string, *APITokenInfo, error) {
+	if name == "" {
+		return "", nil, fmt.Errorf("token name is required")
+	}
+	raw := "mct_" + newSessionToken()[:32]
+	hash := sha256Hex(raw)
+	prefix := raw[:12]
+	id := newID()
+	scopesJSON, _ := json.Marshal(scopes)
+
+	_, err := s.db.Exec(
+		`INSERT INTO api_tokens (id, user_id, name, token_hash, prefix, scopes) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, userID, name, hash, prefix, string(scopesJSON),
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("create token: %w", err)
+	}
+
+	return raw, &APITokenInfo{
+		ID:        id,
+		Name:      name,
+		Prefix:    prefix,
+		Scopes:    scopes,
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func (s *Store) ValidateAPIToken(rawToken string) (*Session, error) {
+	hash := sha256Hex(rawToken)
+	row := s.db.QueryRow(
+		`SELECT id, user_id, name FROM api_tokens WHERE token_hash = ?`,
+		hash,
+	)
+	var tokenID, userID, name string
+	if err := row.Scan(&tokenID, &userID, &name); err != nil {
+		return nil, fmt.Errorf("invalid API token")
+	}
+
+	// Create a transient session for the token.
+	sess, err := s.CreateSession(userID, "api-token", 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update last_used.
+	s.db.Exec(`UPDATE api_tokens SET last_used = datetime('now') WHERE id = ?`, tokenID)
+	return sess, nil
+}
+
+func (s *Store) ListAPITokens(userID string) ([]*APITokenInfo, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, prefix, scopes, created_at FROM api_tokens WHERE user_id = ? ORDER BY created_at`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []*APITokenInfo
+	for rows.Next() {
+		t := &APITokenInfo{}
+		var scopesJSON, createdAtStr string
+		if err := rows.Scan(&t.ID, &t.Name, &t.Prefix, &scopesJSON, &createdAtStr); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(scopesJSON), &t.Scopes)
+		t.CreatedAt = parseTime(createdAtStr)
+		tokens = append(tokens, t)
+	}
+	return tokens, nil
+}
+
+func (s *Store) DeleteAPIToken(id string) error {
+	_, err := s.db.Exec(`DELETE FROM api_tokens WHERE id = ?`, id)
+	return err
+}
+
 // --- Password Authentication ---
 
 func (s *Store) VerifyPassword(username, password string) (*User, error) {
@@ -472,6 +560,12 @@ func newID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// sha256Hex returns the hex-encoded SHA-256 hash of s.
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
 }
 
 // parseTime parses a SQLite datetime string with the format used by

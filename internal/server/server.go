@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"time"
 
 	"github.com/pquerna/otp/totp"
 	"google.golang.org/grpc"
@@ -41,6 +42,8 @@ func (s *AuthServer) Authenticate(ctx context.Context, req *authv1.AuthenticateR
 		return s.authPassword(req)
 	case "totp":
 		return s.authTOTP(req)
+	case "api-key":
+		return s.authAPIKey(req)
 	default:
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
@@ -161,6 +164,40 @@ func (s *AuthServer) authTOTP(req *authv1.AuthenticateRequest) (*authv1.Authenti
 	return &authv1.AuthenticateResponse{
 		Authenticated: true,
 		SessionToken:  fullSess.Token,
+		UserId:        user.ID,
+		Username:      user.Username,
+		Roles:         user.Roles,
+	}, nil
+}
+
+func (s *AuthServer) authAPIKey(req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
+	var creds struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(req.CredentialData, &creds); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid credential data")
+	}
+
+	token, err := s.store.ValidateAPIToken(creds.Key)
+	if err != nil {
+		slog.Warn("auth: invalid API key")
+		return &authv1.AuthenticateResponse{
+			Authenticated: false,
+			Error:         "invalid API key",
+		}, nil
+	}
+
+	user, err := s.store.GetUser(token.UserID)
+	if err != nil {
+		return &authv1.AuthenticateResponse{
+			Authenticated: false,
+			Error:         "user not found",
+		}, nil
+	}
+
+	return &authv1.AuthenticateResponse{
+		Authenticated: true,
+		SessionToken:  token.Token,
 		UserId:        user.ID,
 		Username:      user.Username,
 		Roles:         user.Roles,
@@ -303,6 +340,99 @@ func (s *AuthServer) VerifyTOTPSetup(ctx context.Context, req *authv1.VerifyTOTP
 	}
 
 	return &authv1.VerifyTOTPSetupResponse{Verified: true}, nil
+}
+
+// --- User Management ---
+
+func (s *AuthServer) CreateUser(ctx context.Context, req *authv1.CreateUserRequest) (*authv1.CreateUserResponse, error) {
+	if req.Username == "" || req.Password == "" {
+		return &authv1.CreateUserResponse{Error: "username and password are required"}, nil
+	}
+	user, err := s.store.CreateUser(req.Username, req.Password)
+	if err != nil {
+		return &authv1.CreateUserResponse{Error: err.Error()}, nil
+	}
+	return &authv1.CreateUserResponse{UserId: user.ID}, nil
+}
+
+func (s *AuthServer) DeleteUser(ctx context.Context, req *authv1.DeleteUserRequest) (*authv1.DeleteUserResponse, error) {
+	if err := s.store.DeleteUser(req.UserId); err != nil {
+		return &authv1.DeleteUserResponse{Error: err.Error()}, nil
+	}
+	return &authv1.DeleteUserResponse{}, nil
+}
+
+func (s *AuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersRequest) (*authv1.ListUsersResponse, error) {
+	users, err := s.store.ListUsers()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	var infos []*authv1.UserInfo
+	for _, u := range users {
+		_, totpEnabled, _ := s.store.GetTOTPSecret(u.ID)
+		infos = append(infos, &authv1.UserInfo{
+			Id:          u.ID,
+			Username:    u.Username,
+			Roles:       u.Roles,
+			TotpEnabled: totpEnabled,
+		})
+	}
+	return &authv1.ListUsersResponse{Users: infos}, nil
+}
+
+func (s *AuthServer) SetPassword(ctx context.Context, req *authv1.SetPasswordRequest) (*authv1.SetPasswordResponse, error) {
+	if err := s.store.SetPassword(req.UserId, req.Password); err != nil {
+		return &authv1.SetPasswordResponse{Error: err.Error()}, nil
+	}
+	return &authv1.SetPasswordResponse{}, nil
+}
+
+func (s *AuthServer) SetRoles(ctx context.Context, req *authv1.SetRolesRequest) (*authv1.SetRolesResponse, error) {
+	if err := s.store.SetRoles(req.UserId, req.Roles); err != nil {
+		return &authv1.SetRolesResponse{Error: err.Error()}, nil
+	}
+	return &authv1.SetRolesResponse{}, nil
+}
+
+// --- API Tokens ---
+
+func (s *AuthServer) CreateAPIToken(ctx context.Context, req *authv1.CreateAPITokenRequest) (*authv1.CreateAPITokenResponse, error) {
+	if req.UserId == "" || req.Name == "" {
+		return &authv1.CreateAPITokenResponse{Error: "user_id and name are required"}, nil
+	}
+	token, info, err := s.store.CreateAPIToken(req.UserId, req.Name, req.Scopes)
+	if err != nil {
+		return &authv1.CreateAPITokenResponse{Error: err.Error()}, nil
+	}
+	return &authv1.CreateAPITokenResponse{
+		Token:   token,
+		TokenId: info.ID,
+	}, nil
+}
+
+func (s *AuthServer) ListAPITokens(ctx context.Context, req *authv1.ListAPITokensRequest) (*authv1.ListAPITokensResponse, error) {
+	tokens, err := s.store.ListAPITokens(req.UserId)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	var infos []*authv1.APITokenInfo
+	for _, t := range tokens {
+		infos = append(infos, &authv1.APITokenInfo{
+			Id:        t.ID,
+			Name:      t.Name,
+			Prefix:    t.Prefix,
+			Scopes:    t.Scopes,
+			CreatedAt: t.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return &authv1.ListAPITokensResponse{Tokens: infos}, nil
+}
+
+func (s *AuthServer) DeleteAPIToken(ctx context.Context, req *authv1.DeleteAPITokenRequest) (*authv1.DeleteAPITokenResponse, error) {
+	if err := s.store.DeleteAPIToken(req.TokenId); err != nil {
+		return &authv1.DeleteAPITokenResponse{Error: err.Error()}, nil
+	}
+	return &authv1.DeleteAPITokenResponse{}, nil
 }
 
 func authorizeBuiltin(roles []string, action, resource string) (bool, string) {

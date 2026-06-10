@@ -45,8 +45,10 @@
 - [x] SIGHUP-ready Replace() for future hot-reload
 - [x] 12 unit tests for permission matching
 
-### Phase 6: Admin CLI + API Tokens
-- [ ] Admin CLI: all user management commands
-- [ ] API token CRUD
-- [ ] `CredentialTypeAPIKey` support
-- [ ] SIGHUP reload for RBAC policy file
+### Phase 6: Admin CLI + API Tokens ✅
+- [x] User management RPCs: CreateUser, DeleteUser, ListUsers, SetPassword, SetRoles
+- [x] API token CRUD: CreateAPIToken, ListAPITokens, DeleteAPIToken
+- [x] `api-key` credential type in Authenticate handler
+- [x] API tokens have `mct_` prefix, SHA-256 hashed in storage
+- [x] `authctl` CLI: adduser, passwd, rm, list, addrole, rmrole, totp, token
+- [x] AuthService proto extended with admin + token RPCs
