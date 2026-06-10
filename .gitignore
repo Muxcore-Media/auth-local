@@ -1,6 +1,8 @@
 # Build artifacts
 /auth-local
+/authctl
 /cmd/module/module
+/cmd/authctl/authctl
 
 # IDE
 .idea/
@@ -11,7 +13,8 @@
 .DS_Store
 Thumbs.db
 
-# Auth data (local user DB)
+# Auth database
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
