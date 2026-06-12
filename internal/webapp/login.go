@@ -457,8 +457,9 @@ func safeRedirect(r *url.URL, redirect string) string {
 		return redirect
 	}
 	knownHosts := map[string]bool{
-		"localhost:8082": true,
-		"localhost:3000": true,
+		"localhost:8082":            true,
+		"localhost:3000":            true,
+		"admin-ui.digifender.com":   true,
 	}
 	if knownHosts[parsed.Host] {
 		return redirect

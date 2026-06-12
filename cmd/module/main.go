@@ -11,8 +11,10 @@ import (
 
 func main() {
 	mod := internal.NewModule(internal.Config{})
+	insecure := os.Getenv("MUXCORE_GRPC_INSECURE") == "true"
 	if err := modulesdk.Run(modulesdk.Config{
-		Module: mod,
+		Module:   mod,
+		Insecure: insecure,
 	}); err != nil {
 		slog.Error("module exited", "error", err)
 		os.Exit(1)

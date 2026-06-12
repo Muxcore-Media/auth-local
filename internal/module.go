@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 
@@ -35,10 +36,13 @@ type Module struct {
 }
 
 type Config struct {
-	ID        string
-	GRPCAddr  string
-	HTTPAddr  string
-	PolicyDir string
+	ID              string
+	GRPCAddr        string
+	HTTPAddr        string
+	PolicyDir       string
+	WebAuthnRPID    string
+	WebAuthnOrigins []string
+	WebAuthnRPName  string
 }
 
 func NewModule(cfg Config) *Module {
@@ -60,11 +64,32 @@ func NewModule(cfg Config) *Module {
 	if v := os.Getenv("AUTH_HTTP_ADDR"); v != "" {
 		cfg.HTTPAddr = v
 	}
+	if v := os.Getenv("AUTH_WEBAUTHN_RP_ID"); v != "" {
+		cfg.WebAuthnRPID = v
+	}
+	if v := os.Getenv("AUTH_WEBAUTHN_RP_ORIGINS"); v != "" {
+		cfg.WebAuthnOrigins = strings.Split(v, ",")
+	}
+	if v := os.Getenv("AUTH_WEBAUTHN_RP_NAME"); v != "" {
+		cfg.WebAuthnRPName = v
+	}
+	if cfg.WebAuthnRPID == "" {
+		cfg.WebAuthnRPID = "localhost"
+	}
+	if len(cfg.WebAuthnOrigins) == 0 {
+		cfg.WebAuthnOrigins = []string{"http://localhost:8082"}
+	}
+	if cfg.WebAuthnRPName == "" {
+		cfg.WebAuthnRPName = "MuxCore"
+	}
 	return &Module{
 		id:        cfg.ID,
 		grpcAddr:  cfg.GRPCAddr,
 		httpAddr:  cfg.HTTPAddr,
 		policyDir: cfg.PolicyDir,
+		rpID:      cfg.WebAuthnRPID,
+		rpOrigins: cfg.WebAuthnOrigins,
+		rpName:    cfg.WebAuthnRPName,
 	}
 }
 
