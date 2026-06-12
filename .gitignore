@@ -1,21 +1,31 @@
-# Build artifacts
-/auth-local
-/authctl
+# Binaries
+/your-module
 /module
 /cmd/module/module
-/cmd/authctl/authctl
+
+# Dependencies
+vendor/
 
 # IDE
 .idea/
 .vscode/
 *.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Auth database
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
+# Build artifacts
+/dist/
+/build/
+/tmp/
+
+# Environment
+.env
+.env.local
+*.local.yaml
+
+# Go
+go.work
+go.work.sum

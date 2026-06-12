@@ -1,0 +1,26 @@
+[Unit]
+Description=MuxCore Module - your-module
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=muxcore
+Group=muxcore
+ExecStart=/usr/local/bin/your-module \
+  --muxcore-mesh-addr localhost:9090 \
+  --muxcore-module-id your-module
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+; Security hardening
+CapabilityBoundingSet=
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/your-module
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,28 @@
+run:
+  timeout: 120s
+  modules-download-mode: readonly
+
 linters:
   enable:
-    - gofmt
-    - govet
     - errcheck
-    - staticcheck
     - gosimple
+    - govet
     - ineffassign
+    - staticcheck
+    - typecheck
     - unused
 
-run:
-  timeout: 60s
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment
+      - shadow
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-use-default: false

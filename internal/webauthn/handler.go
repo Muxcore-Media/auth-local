@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -30,11 +32,11 @@ func (u *webUser) WebAuthnName() string               { return u.store.Username 
 func (u *webUser) WebAuthnDisplayName() string         { return u.store.Username }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
-func New(rpID, rpOrigin, rpName string, store *authStore.Store) (*Handler, error) {
+func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store) (*Handler, error) {
 	web, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: rpName,
 		RPID:          rpID,
-		RPOrigins:     []string{rpOrigin},
+		RPOrigins:     rpOrigins,
 	})
 	if err != nil {
 		return nil, err
@@ -48,6 +50,7 @@ func (h *Handler) Mux() *http.ServeMux {
 	mux.HandleFunc("/api/webauthn/register/complete", h.completeRegistration)
 	mux.HandleFunc("/api/webauthn/login/begin", h.beginLogin)
 	mux.HandleFunc("/api/webauthn/login/complete", h.completeLogin)
+
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -145,7 +148,11 @@ func (h *Handler) completeRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sessionData webauthn.SessionData
-	json.Unmarshal(sd, &sessionData)
+	if err := json.Unmarshal(sd, &sessionData); err != nil {
+		slog.Error("webauthn: unmarshal session data", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid session data")
+		return
+	}
 	h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
 	credential, err := h.web.FinishRegistration(user, sessionData, r)
@@ -212,7 +219,11 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sessionData webauthn.SessionData
-	json.Unmarshal(sd, &sessionData)
+	if err := json.Unmarshal(sd, &sessionData); err != nil {
+		slog.Error("webauthn: unmarshal session data", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid session data")
+		return
+	}
 	h.store.DeleteWebAuthnSession(challenge)
 
 	user, err := h.loadUser(string(sessionData.UserID))
@@ -237,7 +248,12 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("webauthn: login successful", "user", user.store.Username)
-	writeJSON(w, http.StatusOK, map[string]string{"session_token": sess.Token})
+
+	redirect := safeRedirectURL(r, r.URL.Query().Get("redirect"))
+	writeJSON(w, http.StatusOK, map[string]string{
+		"session_token": sess.Token,
+		"redirect":      redirect,
+	})
 }
 
 // Helpers
@@ -254,6 +270,159 @@ func mustAuth(w http.ResponseWriter, r *http.Request, store *authStore.Store) *a
 		return nil
 	}
 	return sess
+}
+
+func (h *Handler) listCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+
+	infos, err := h.store.ListWebAuthnCredentialMeta(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	if infos == nil {
+		infos = []authStore.WebAuthnCredentialInfo{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"credentials": infos,
+		"count":       len(infos),
+	})
+}
+
+func (h *Handler) deleteCredential(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "DELETE required")
+		return
+	}
+
+	// Path: /api/webauthn/credentials/{credentialID}
+	credID := strings.TrimPrefix(r.URL.Path, "/api/webauthn/credentials/")
+	if credID == "" {
+		writeError(w, http.StatusBadRequest, "credential ID required")
+		return
+	}
+
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+
+	if err := h.store.DeleteWebAuthnCredential(userID, credID); err != nil {
+		writeError(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handler) beginAdminRegistration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+
+	user, err := h.loadUser(userID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	options, sessionData, err := h.web.BeginRegistration(user)
+	if err != nil {
+		slog.Error("webauthn: begin admin registration", "error", err)
+		writeError(w, http.StatusInternalServerError, "registration failed")
+		return
+	}
+
+	sd, _ := json.Marshal(sessionData)
+	if err := h.store.SaveWebAuthnSession(user.store.ID, sessionData.Challenge, sd); err != nil {
+		slog.Error("webauthn: save session", "error", err)
+		writeError(w, http.StatusInternalServerError, "save failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, options)
+}
+
+func (h *Handler) completeAdminRegistration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+
+	user, err := h.loadUser(userID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	challenge := r.URL.Query().Get("challenge")
+	sd, err := h.store.GetWebAuthnSession(challenge)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "challenge not found — complete later")
+		return
+	}
+	var sessionData webauthn.SessionData
+	if err := json.Unmarshal(sd, &sessionData); err != nil {
+		slog.Error("webauthn: unmarshal session data", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid session data")
+		return
+	}
+	h.store.DeleteWebAuthnSession(sessionData.Challenge)
+
+	credential, err := h.web.FinishRegistration(user, sessionData, r)
+	if err != nil {
+		slog.Error("webauthn: finish admin registration", "error", err)
+		writeError(w, http.StatusBadRequest, "registration verification failed")
+		return
+	}
+
+	h.saveCredential(user.store.ID, credential)
+	slog.Info("webauthn: credential registered via admin", "user", user.store.Username)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "registered"})
+}
+
+// safeRedirectURL validates the redirect param to prevent open redirect attacks.
+func safeRedirectURL(r *http.Request, redirect string) string {
+	if redirect == "" {
+		return "/"
+	}
+	parsed, err := url.Parse(redirect)
+	if err != nil {
+		return "/"
+	}
+	if !parsed.IsAbs() {
+		return redirect
+	}
+	if parsed.Host == r.Host {
+		return redirect
+	}
+	knownHosts := map[string]bool{
+		"localhost:8082": true,
+		"localhost:3000": true,
+	}
+	if knownHosts[parsed.Host] {
+		return redirect
+	}
+	return "/"
 }
 
 func extractBearerToken(r *http.Request) string {

@@ -1,11 +1,41 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout 120s
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.26" }
-      - run: go mod tidy && go vet ./...
-      - run: go test -race -count=1 ./...
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go test -race -count=1 -timeout 60s ./...
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go build -o /dev/null ./cmd/module
+      - run: go vet ./...

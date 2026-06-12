@@ -393,8 +393,11 @@ func (s *Store) GetSession(token string) (*Session, error) {
 	}
 	sess.ExpiresAt = parseTime(expiresAt)
 	if sess.ExpiresAt.IsZero() {
-		// If parseTime couldn't parse it, treat as expired immediately.
 		slog.Warn("session has unparseable expiration, treating as expired", "token", sess.Token[:8])
+		s.DeleteSession(token)
+		return nil, fmt.Errorf("session expired")
+	}
+	if time.Now().After(sess.ExpiresAt) {
 		s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
@@ -523,6 +526,45 @@ func (s *Store) ListWebAuthnCredentials(userID string) ([][]byte, error) {
 		creds = append(creds, data)
 	}
 	return creds, nil
+}
+
+type WebAuthnCredentialInfo struct {
+	ID             string    `json:"id"`
+	CredentialType string    `json:"credential_type"`
+	Transports     string    `json:"transports"`
+	AAGUID         string    `json:"aaguid"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastUsedAt     time.Time `json:"last_used_at"`
+}
+
+func (s *Store) ListWebAuthnCredentialMeta(userID string) ([]WebAuthnCredentialInfo, error) {
+	rows, err := s.db.Query(
+		`SELECT id, credential_type, transports, aaguid, created_at, COALESCE(last_used_at, '') FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var infos []WebAuthnCredentialInfo
+	for rows.Next() {
+		var info WebAuthnCredentialInfo
+		var createdStr, lastUsedStr string
+		if err := rows.Scan(&info.ID, &info.CredentialType, &info.Transports, &info.AAGUID, &createdStr, &lastUsedStr); err != nil {
+			return nil, err
+		}
+		info.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdStr)
+		info.LastUsedAt, _ = time.Parse("2006-01-02 15:04:05", lastUsedStr)
+		infos = append(infos, info)
+	}
+	return infos, nil
+}
+
+func (s *Store) WebAuthnCredentialCount(userID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM webauthn_credentials WHERE user_id = ?`, userID).Scan(&count)
+	return count, err
 }
 
 func (s *Store) DeleteWebAuthnCredential(userID, credentialID string) error {

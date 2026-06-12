@@ -2,14 +2,21 @@ module github.com/Muxcore-Media/auth-local
 
 go 1.26.4
 
-replace github.com/Muxcore-Media/core => /home/enderk/claude/core
+replace github.com/Muxcore-Media/core => ../core
+
+replace github.com/Muxcore-Media/core/sdk/go/module => ../core/sdk/go/module
+
+replace github.com/Muxcore-Media/core/pkg/contracts => ../core/pkg/contracts
 
 require (
 	github.com/Muxcore-Media/core v0.4.0
+	github.com/Muxcore-Media/core/pkg/contracts v0.0.0
+	github.com/Muxcore-Media/core/sdk/go/module v0.1.0
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.53.0
 	google.golang.org/grpc v1.81.1
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.52.0
 )
 
@@ -28,12 +35,11 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260610212136-7ab31c22f7ad // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

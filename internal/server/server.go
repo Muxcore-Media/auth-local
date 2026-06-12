@@ -1,15 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pquerna/otp/totp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -18,7 +21,7 @@ import (
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
 	"github.com/Muxcore-Media/auth-local/internal/policy"
-	"github.com/Muxcore-Media/auth-local/internal/store"
+	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
 const issuerName = "MuxCore"
@@ -26,10 +29,13 @@ const issuerName = "MuxCore"
 // AuthServer implements the AuthService gRPC server.
 type AuthServer struct {
 	authv1.UnimplementedAuthServiceServer
-	store        *store.Store
+	store        *authStore.Store
 	policy       *policy.Policy
 	loginSuccess atomic.Int64
 	loginFailed  atomic.Int64
+	rpID         string
+	rpOrigins    []string
+	rpName       string
 }
 
 // Metrics returns Prometheus-format metrics.
@@ -49,8 +55,8 @@ func (s *AuthServer) Metrics() string {
 	return b.String()
 }
 
-func New(s *store.Store, p *policy.Policy) *AuthServer {
-	return &AuthServer{store: s, policy: p}
+func New(s *authStore.Store, p *policy.Policy, rpID string, rpOrigins []string, rpName string) *AuthServer {
+	return &AuthServer{store: s, policy: p, rpID: rpID, rpOrigins: rpOrigins, rpName: rpName}
 }
 
 func (s *AuthServer) RegisterWithGRPC(srv *grpc.Server) {
@@ -469,6 +475,147 @@ func (s *AuthServer) DeleteAPIToken(ctx context.Context, req *authv1.DeleteAPITo
 	}
 	return &authv1.DeleteAPITokenResponse{}, nil
 }
+
+// --- WebAuthn Credential Management ---
+
+func (s *AuthServer) ListWebAuthnCredentials(ctx context.Context, req *authv1.ListWebAuthnCredentialsRequest) (*authv1.ListWebAuthnCredentialsResponse, error) {
+	infos, err := s.store.ListWebAuthnCredentialMeta(req.UserId)
+	if err != nil {
+		return &authv1.ListWebAuthnCredentialsResponse{Error: "list failed"}, nil
+	}
+	var pbCreds []*authv1.WebAuthnCredentialInfo
+	for _, info := range infos {
+		pbCreds = append(pbCreds, &authv1.WebAuthnCredentialInfo{
+			Id:             info.ID,
+			CredentialType: info.CredentialType,
+			Transports:     info.Transports,
+			Aaguid:         info.AAGUID,
+			CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+			LastUsedAt:     info.LastUsedAt.Format(time.RFC3339),
+		})
+	}
+	return &authv1.ListWebAuthnCredentialsResponse{Credentials: pbCreds}, nil
+}
+
+func (s *AuthServer) DeleteWebAuthnCredential(ctx context.Context, req *authv1.DeleteWebAuthnCredentialRequest) (*authv1.DeleteWebAuthnCredentialResponse, error) {
+	if err := s.store.DeleteWebAuthnCredential(req.UserId, req.CredentialId); err != nil {
+		return &authv1.DeleteWebAuthnCredentialResponse{Error: "delete failed"}, nil
+	}
+	return &authv1.DeleteWebAuthnCredentialResponse{}, nil
+}
+
+func (s *AuthServer) BeginAdminRegistration(ctx context.Context, req *authv1.BeginAdminRegistrationRequest) (*authv1.BeginAdminRegistrationResponse, error) {
+	// Load user with WebAuthn credentials
+	user, err := s.loadWebAuthnUser(req.UserId)
+	if err != nil {
+		return &authv1.BeginAdminRegistrationResponse{Error: err.Error()}, nil
+	}
+
+	web, err := webauthn.New(&webauthn.Config{
+		RPDisplayName: s.rpName,
+		RPID:          s.rpID,
+		RPOrigins:     s.rpOrigins,
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, "webauthn init failed")
+	}
+
+	options, sessionData, err := web.BeginRegistration(user)
+	if err != nil {
+		return &authv1.BeginAdminRegistrationResponse{Error: "registration failed"}, nil
+	}
+
+	sd, _ := json.Marshal(sessionData)
+	if err := s.store.SaveWebAuthnSession(req.UserId, sessionData.Challenge, sd); err != nil {
+		return nil, status.Error(codes.Internal, "save session failed")
+	}
+
+	optsJSON, _ := json.Marshal(options)
+	return &authv1.BeginAdminRegistrationResponse{
+		OptionsJson: optsJSON,
+		Challenge:   sessionData.Challenge,
+	}, nil
+}
+
+func (s *AuthServer) CompleteAdminRegistration(ctx context.Context, req *authv1.CompleteAdminRegistrationRequest) (*authv1.CompleteAdminRegistrationResponse, error) {
+	sd, err := s.store.GetWebAuthnSession(req.Challenge)
+	if err != nil {
+		return &authv1.CompleteAdminRegistrationResponse{Error: "challenge not found or expired"}, nil
+	}
+	var sessionData webauthn.SessionData
+	if err := json.Unmarshal(sd, &sessionData); err != nil {
+		return &authv1.CompleteAdminRegistrationResponse{Error: "invalid session data"}, nil
+	}
+	s.store.DeleteWebAuthnSession(sessionData.Challenge)
+
+	user, err := s.loadWebAuthnUser(req.UserId)
+	if err != nil {
+		return &authv1.CompleteAdminRegistrationResponse{Error: err.Error()}, nil
+	}
+
+	web, err := webauthn.New(&webauthn.Config{
+		RPDisplayName: s.rpName,
+		RPID:          s.rpID,
+		RPOrigins:     s.rpOrigins,
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, "webauthn init failed")
+	}
+
+	// Reconstruct HTTP request for FinishRegistration with the first allowed origin.
+	origin := "http://localhost:8082"
+	if len(s.rpOrigins) > 0 {
+		origin = s.rpOrigins[0]
+	}
+	httpReq, _ := http.NewRequest("POST", "/", bytes.NewReader(req.CredentialResponseJson))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Origin", origin)
+
+	credential, err := web.FinishRegistration(user, sessionData, httpReq)
+	if err != nil {
+		return &authv1.CompleteAdminRegistrationResponse{Error: "registration verification failed"}, nil
+	}
+
+	credData, _ := json.Marshal(credential)
+	if err := s.store.AddWebAuthnCredential(req.UserId, credData); err != nil {
+		return nil, status.Error(codes.Internal, "save credential failed")
+	}
+
+	slog.Info("webauthn: credential registered via gRPC", "user", user.store.Username)
+	return &authv1.CompleteAdminRegistrationResponse{}, nil
+}
+
+func (s *AuthServer) loadWebAuthnUser(userID string) (*webUser, error) {
+	su, err := s.store.GetUser(userID)
+	if err != nil {
+		return nil, fmt.Errorf("user not found")
+	}
+	u := &webUser{store: su}
+	creds, err := s.store.ListWebAuthnCredentials(su.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, data := range creds {
+		var c webauthn.Credential
+		if err := json.Unmarshal(data, &c); err != nil {
+			slog.Warn("webauthn: unmarshal credential", "error", err)
+			continue
+		}
+		u.creds = append(u.creds, c)
+	}
+	return u, nil
+}
+
+// webUser wraps authStore.User to implement webauthn.User.
+type webUser struct {
+	store *authStore.User
+	creds []webauthn.Credential
+}
+
+func (u *webUser) WebAuthnID() []byte                { return []byte(u.store.ID) }
+func (u *webUser) WebAuthnName() string               { return u.store.Username }
+func (u *webUser) WebAuthnDisplayName() string         { return u.store.Username }
+func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 func authorizeBuiltin(roles []string, action, resource string) (bool, string) {
 	for _, role := range roles {

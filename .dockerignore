@@ -1,6 +1,5 @@
-module: auth-local/.dockerignore
 *
-!cmd/module
-!internal
+!cmd/
+!internal/
 !go.mod
 !go.sum
