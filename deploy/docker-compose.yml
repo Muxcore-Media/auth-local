@@ -1,29 +1,16 @@
 services:
-  core:
-    image: ghcr.io/muxcore-media/core:latest
-    ports:
-      - "9090:9090"
-    environment:
-      MUXCORE_INSECURE_DISABLE_TLS: "true"
-      MUXCORE_LOG_LEVEL: debug
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:9090/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-
-  your-module:
+  auth-local:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     ports:
-      - "9400"
+      - "9041:9041"
     environment:
       MUXCORE_GRPC_ADDR: core:9090
-      MUXCORE_INSECURE_DISABLE_TLS: "true"
-      MUXCORE_LOG_LEVEL: debug
-      MUXCORE_MODULE_ID: your-module
-    depends_on:
-      core:
-        condition: service_healthy
+      MUXCORE_GRPC_INSECURE: "true"
+      MUXCORE_GRPC_SEED_NODES: core-2:9090
+      AUTH_GRPC_ADDR: :9400
+      AUTH_HTTP_ADDR: :9041
+      AUTH_DB_PATH: /data/auth.db
+    volumes:
+      - auth-data:/data

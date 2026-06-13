@@ -29,6 +29,7 @@ type Module struct {
 	id         string
 	grpcAddr   string
 	httpAddr   string
+	dbPath     string
 	policyDir  string
 	rpID       string
 	rpOrigins  []string
@@ -39,6 +40,7 @@ type Config struct {
 	ID              string
 	GRPCAddr        string
 	HTTPAddr        string
+	DBPath          string
 	PolicyDir       string
 	WebAuthnRPID    string
 	WebAuthnOrigins []string
@@ -70,6 +72,9 @@ func NewModule(cfg Config) *Module {
 	if v := os.Getenv("AUTH_WEBAUTHN_RP_ORIGINS"); v != "" {
 		cfg.WebAuthnOrigins = strings.Split(v, ",")
 	}
+	if v := os.Getenv("AUTH_DB_PATH"); v != "" {
+		cfg.DBPath = v
+	}
 	if v := os.Getenv("AUTH_WEBAUTHN_RP_NAME"); v != "" {
 		cfg.WebAuthnRPName = v
 	}
@@ -86,6 +91,7 @@ func NewModule(cfg Config) *Module {
 		id:        cfg.ID,
 		grpcAddr:  cfg.GRPCAddr,
 		httpAddr:  cfg.HTTPAddr,
+		dbPath:    cfg.DBPath,
 		policyDir: cfg.PolicyDir,
 		rpID:      cfg.WebAuthnRPID,
 		rpOrigins: cfg.WebAuthnOrigins,
@@ -102,13 +108,19 @@ func (m *Module) Info() contracts.ModuleInfo {
 		Description:  "Local authentication and authorization provider",
 		Author:       "MuxCore",
 		Capabilities: []string{contracts.CapabilityAuth, contracts.CapabilityAuthorizer, contracts.CapabilityIdentity},
-		HTTPAddr:     m.grpcAddr,
+		Contracts: []contracts.ContractDeclaration{
+			{Repo: "github.com/Muxcore-Media/core/pkg/contracts", Interface: "AuthProvider", Version: "v0.4.0"},
+			{Repo: "github.com/Muxcore-Media/core/pkg/contracts", Interface: "IdentityProvider", Version: "v0.4.0"},
+			{Repo: "github.com/Muxcore-Media/core/pkg/contracts", Interface: "Authorizer", Version: "v0.4.0"},
+		},
+		MinCoreVersion: "0.4.0",
+		HTTPAddr:       m.grpcAddr,
 	}
 }
 
 func (m *Module) Init(ctx context.Context) error {
 	var err error
-	m.store, err = authStore.New("")
+	m.store, err = authStore.New(m.dbPath)
 	if err != nil {
 		return fmt.Errorf("init store: %w", err)
 	}

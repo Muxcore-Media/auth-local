@@ -117,7 +117,7 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 		}
 		return &authv1.AuthenticateResponse{
 			Authenticated:    false,
-			Requires_2Fa:      true,
+			Requires_2Fa:     true,
 			PartialToken:     sess.Token,
 			AvailableMethods: []string{"totp"},
 			UserId:           user.ID,
@@ -346,8 +346,8 @@ func (s *AuthServer) EnableTOTP(ctx context.Context, req *authv1.EnableTOTPReque
 	qrURL := fmt.Sprintf("otpauth://totp/%s:%s?%s", issuerName, user.Username, q.Encode())
 
 	return &authv1.EnableTOTPResponse{
-		Secret:     key.Secret(),
-		QrCodeUrl:  qrURL,
+		Secret:    key.Secret(),
+		QrCodeUrl: qrURL,
 	}, nil
 }
 
@@ -612,9 +612,9 @@ type webUser struct {
 	creds []webauthn.Credential
 }
 
-func (u *webUser) WebAuthnID() []byte                { return []byte(u.store.ID) }
-func (u *webUser) WebAuthnName() string               { return u.store.Username }
-func (u *webUser) WebAuthnDisplayName() string         { return u.store.Username }
+func (u *webUser) WebAuthnID() []byte                         { return []byte(u.store.ID) }
+func (u *webUser) WebAuthnName() string                       { return u.store.Username }
+func (u *webUser) WebAuthnDisplayName() string                { return u.store.Username }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 func authorizeBuiltin(roles []string, action, resource string) (bool, string) {

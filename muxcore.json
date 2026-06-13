@@ -1,9 +1,14 @@
 {
   "name": "Auth Local",
-  "description": "Local authentication and authorization. Provides AuthProvider, Authorizer, and IdentityProvider with local user storage and RBAC.",
+  "description": "Local authentication and authorization provider with WebAuthn passkey support.",
   "version": "0.1.0",
   "author": "MuxCore",
-  "roles": ["security", "auth"],
+  "roles": ["infrastructure"],
   "capabilities": ["auth", "authorizer", "identity"],
-  "contracts": []
+  "contracts": [
+    {"repo": "github.com/Muxcore-Media/core/pkg/contracts", "interface": "AuthProvider", "version": "v0.4.0"},
+    {"repo": "github.com/Muxcore-Media/core/pkg/contracts", "interface": "IdentityProvider", "version": "v0.4.0"},
+    {"repo": "github.com/Muxcore-Media/core/pkg/contracts", "interface": "Authorizer", "version": "v0.4.0"}
+  ],
+  "minCoreVersion": "0.4.0"
 }

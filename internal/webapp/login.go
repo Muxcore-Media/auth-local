@@ -2,8 +2,8 @@ package webapp
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"html/template"
 	"log/slog"
@@ -174,7 +174,6 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 
 // --- Admin key check ---
 
-
 func (h *Handler) rateLimitCleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -223,7 +222,9 @@ func (h *Handler) redirectWithCode(w http.ResponseWriter, r *http.Request, sessT
 	if strings.Contains(redirect, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, redirect+sep+"code="+code, http.StatusSeeOther)
+	target := redirect + sep + "code=" + code
+	slog.Info("login: redirecting with code", "target", target, "host", r.Host)
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 // --- Login page ---
@@ -238,6 +239,7 @@ func (h *Handler) loginHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, errMsg string) {
 	redirect := safeRedirect(r.URL, r.URL.Query().Get("redirect"))
+	slog.Info("login: render page", "method", r.Method, "host", r.Host, "path", r.URL.Path, "query_redirect", r.URL.Query().Get("redirect"), "safe_redirect", redirect, "error", errMsg)
 
 	hasPasskeys := false
 	users, err := h.store.ListUsers()
@@ -297,10 +299,10 @@ func (h *Handler) renderTOTP(w http.ResponseWriter, r *http.Request, partialToke
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, map[string]string{
-		"Error":         errMsg,
-		"PartialToken":  partialToken,
-		"Redirect":      redirect,
-		"CSRFToken":     csrfToken,
+		"Error":        errMsg,
+		"PartialToken": partialToken,
+		"Redirect":     redirect,
+		"CSRFToken":    csrfToken,
 	}); err != nil {
 		slog.Error("totp template execute", "error", err)
 	}
@@ -315,46 +317,62 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := extractIP(r)
+	slog.Info("login: POST received", "ip", ip, "host", r.Host, "path", r.URL.Path)
+
 	if !h.checkRateLimit(ip) {
+		slog.Warn("login: rate limited", "ip", ip)
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
+		slog.Warn("login: parse form failed", "ip", ip, "error", err)
 		h.renderLogin(w, r, "Invalid form data")
 		return
 	}
 
 	cookieCSRF, _ := r.Cookie("csrf-token")
 	formCSRF := r.FormValue("csrf_token")
+	cookieVal := ""
+	if cookieCSRF != nil {
+		cookieVal = cookieCSRF.Value
+	}
+	slog.Info("login: CSRF check", "ip", ip, "cookie_present", cookieCSRF != nil, "cookie_val_len", len(cookieVal), "form_val_len", len(formCSRF), "match", cookieVal == formCSRF)
 	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
+		slog.Warn("login: CSRF mismatch", "ip", ip)
 		h.renderLogin(w, r, "Invalid form token — please reload and try again")
 		return
 	}
 
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	redirect := safeRedirect(r.URL, r.FormValue("redirect"))
+	formRedirect := r.FormValue("redirect")
+	redirect := safeRedirect(r.URL, formRedirect)
+	slog.Info("login: form values", "ip", ip, "username", username, "form_redirect", formRedirect, "safe_redirect", redirect, "query_redirect", r.URL.Query().Get("redirect"))
 	if redirect == "/" {
 		redirect = safeRedirect(r.URL, r.URL.Query().Get("redirect"))
+		slog.Info("login: fallback redirect", "ip", ip, "fallback", redirect)
 	}
 
 	if username == "" || password == "" {
+		slog.Warn("login: empty credentials", "ip", ip)
 		h.renderLogin(w, r, "Username and password are required")
 		return
 	}
 
 	user, err := h.store.VerifyPassword(username, password)
 	if err != nil {
-		slog.Warn("login: password verification failed", "username", username)
+		slog.Warn("login: password verification failed", "username", username, "ip", ip, "error", err)
 		h.renderLogin(w, r, "Invalid username or password")
 		return
 	}
+	slog.Info("login: password verified", "username", username, "user_id", user.ID, "ip", ip)
 
 	// Check if TOTP is required.
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
 	if err == nil && totpEnabled && secret != "" {
+		slog.Info("login: TOTP required", "username", username, "ip", ip)
 		partialSess, err := h.store.CreatePartialSession(user.ID)
 		if err != nil {
 			slog.Error("login: create partial session failed", "error", err)
@@ -371,6 +389,7 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		h.renderLogin(w, r, "Internal error")
 		return
 	}
+	slog.Info("login: session created", "username", username, "ip", ip, "session_token", sess.Token[:8]+"...")
 
 	h.redirectWithCode(w, r, sess.Token, redirect)
 }
@@ -457,9 +476,9 @@ func safeRedirect(r *url.URL, redirect string) string {
 		return redirect
 	}
 	knownHosts := map[string]bool{
-		"localhost:8082":            true,
-		"localhost:3000":            true,
-		"admin-ui.digifender.com":   true,
+		"localhost:8082":          true,
+		"localhost:3000":          true,
+		"admin-ui.digifender.com": true,
 	}
 	if knownHosts[parsed.Host] {
 		return redirect

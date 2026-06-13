@@ -29,3 +29,4 @@ Thumbs.db
 # Go
 go.work
 go.work.sum
+*.db

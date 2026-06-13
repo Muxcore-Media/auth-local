@@ -23,13 +23,13 @@ type Handler struct {
 
 // webUser wraps store.User to implement webauthn.User.
 type webUser struct {
-	store  *authStore.User
-	creds  []webauthn.Credential
+	store *authStore.User
+	creds []webauthn.Credential
 }
 
-func (u *webUser) WebAuthnID() []byte                { return []byte(u.store.ID) }
-func (u *webUser) WebAuthnName() string               { return u.store.Username }
-func (u *webUser) WebAuthnDisplayName() string         { return u.store.Username }
+func (u *webUser) WebAuthnID() []byte                         { return []byte(u.store.ID) }
+func (u *webUser) WebAuthnName() string                       { return u.store.Username }
+func (u *webUser) WebAuthnDisplayName() string                { return u.store.Username }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store) (*Handler, error) {
@@ -416,9 +416,9 @@ func safeRedirectURL(r *http.Request, redirect string) string {
 		return redirect
 	}
 	knownHosts := map[string]bool{
-		"localhost:8082":            true,
-		"localhost:3000":            true,
-		"admin-ui.digifender.com":   true,
+		"localhost:8082":          true,
+		"localhost:3000":          true,
+		"admin-ui.digifender.com": true,
 	}
 	if knownHosts[parsed.Host] {
 		return redirect
