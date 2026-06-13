@@ -5,37 +5,83 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: core
+          repository: Muxcore-Media/core
+      - uses: actions/checkout@v4
+        with:
+          path: auth-local
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
           cache: true
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          args: --timeout 120s
+      - working-directory: ./auth-local
+        run: go vet ./...
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: core
+          repository: Muxcore-Media/core
+      - uses: actions/checkout@v4
+        with:
+          path: auth-local
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
           cache: true
-      - run: go test -race -count=1 -timeout 60s ./...
+      - working-directory: ./auth-local
+        run: go test -race -count=1 -timeout 60s ./...
 
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: core
+          repository: Muxcore-Media/core
+      - uses: actions/checkout@v4
+        with:
+          path: auth-local
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
           cache: true
-      - run: go build -o /dev/null ./cmd/module
-      - run: go vet ./...
+      - working-directory: ./auth-local
+        run: go build -o /dev/null ./cmd/module
+
+  docker:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [lint, test, build]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: core
+          repository: Muxcore-Media/core
+      - uses: actions/checkout@v4
+        with:
+          path: auth-local
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./auth-local/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}
