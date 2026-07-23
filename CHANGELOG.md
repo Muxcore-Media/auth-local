@@ -4,4 +4,9 @@
 
 ### Added
 
-- Initial scaffold: README, ROADMAP, project structure.
+- Load RBAC policy from `AUTH_POLICY_FILE` / `--policy-file` (builtin default when missing)
+- SIGHUP policy reload
+- `GET /metrics` Prometheus counters
+- `AUTH_DB_PATH` / `--db-path` SQLite path (default `~/.muxcore/auth.db`)
+- WebAuthn HTTP routes + `AUTH_RP_ID` / `AUTH_RP_ORIGINS` / `AUTH_RP_NAME`
+- Module CLI flags mirroring env (`--db-path`, `--policy-file`, `--grpc-addr`, …)

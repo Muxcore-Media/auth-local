@@ -65,6 +65,9 @@ func (s *AuthServer) RegisterWithGRPC(srv *grpc.Server) {
 
 // SetPolicy replaces the RBAC policy at runtime. Used for SIGHUP reload.
 func (s *AuthServer) SetPolicy(p *policy.Policy) {
+	if p == nil {
+		return
+	}
 	if s.policy != nil {
 		s.policy.Replace(p)
 	} else {
@@ -117,7 +120,7 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 		}
 		return &authv1.AuthenticateResponse{
 			Authenticated:    false,
-			Requires_2Fa:      true,
+			Requires_2Fa:     true,
 			PartialToken:     sess.Token,
 			AvailableMethods: []string{"totp"},
 			UserId:           user.ID,
@@ -283,7 +286,7 @@ func (s *AuthServer) Can(ctx context.Context, req *authv1.CanRequest) (*authv1.C
 	if s.policy != nil {
 		allowed, reason = s.policy.IsAllowed(user.Roles, req.Action, req.Resource)
 	} else {
-		allowed, reason = authorizeBuiltin(user.Roles, req.Action, req.Resource)
+		allowed, reason = false, "no policy loaded"
 	}
 	return &authv1.CanResponse{Allowed: allowed, Reason: reason}, nil
 }
@@ -346,8 +349,8 @@ func (s *AuthServer) EnableTOTP(ctx context.Context, req *authv1.EnableTOTPReque
 	qrURL := fmt.Sprintf("otpauth://totp/%s:%s?%s", issuerName, user.Username, q.Encode())
 
 	return &authv1.EnableTOTPResponse{
-		Secret:     key.Secret(),
-		QrCodeUrl:  qrURL,
+		Secret:    key.Secret(),
+		QrCodeUrl: qrURL,
 	}, nil
 }
 
@@ -612,30 +615,15 @@ type webUser struct {
 	creds []webauthn.Credential
 }
 
-func (u *webUser) WebAuthnID() []byte                { return []byte(u.store.ID) }
-func (u *webUser) WebAuthnName() string               { return u.store.Username }
-func (u *webUser) WebAuthnDisplayName() string         { return u.store.Username }
+func (u *webUser) WebAuthnID() []byte                         { return []byte(u.store.ID) }
+func (u *webUser) WebAuthnName() string                       { return u.store.Username }
+func (u *webUser) WebAuthnDisplayName() string                { return u.store.Username }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
-func authorizeBuiltin(roles []string, action, resource string) (bool, string) {
-	for _, role := range roles {
-		switch role {
-		case "admin":
-			return true, ""
-		case "manager":
-			if resource == "modules.manage" {
-				return true, ""
-			}
-			fallthrough
-		case "user":
-			if action == "read" || action == "view" || action == "request" {
-				return true, ""
-			}
-		case "viewer":
-			if action == "view" || action == "read" {
-				return true, ""
-			}
-		}
+// AuthorizeForTest evaluates RBAC without a store user lookup (tests only).
+func (s *AuthServer) AuthorizeForTest(roles []string, action, resource string) (bool, string) {
+	if s.policy == nil {
+		return false, "no policy loaded"
 	}
-	return false, "insufficient permissions"
+	return s.policy.IsAllowed(roles, action, resource)
 }
