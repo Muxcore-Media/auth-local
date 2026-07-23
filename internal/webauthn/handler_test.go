@@ -18,7 +18,7 @@ func newTestHandler(t *testing.T) (*Handler, *authStore.Store) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	h, err := New("localhost", "http://localhost:8080", "MuxCore Test", st)
+	h, err := New("localhost", []string{"http://localhost:8080"}, "MuxCore Test", st)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

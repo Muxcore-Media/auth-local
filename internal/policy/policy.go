@@ -9,6 +9,37 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// BuiltinYAML is the documented default RBAC policy used when AUTH_POLICY_FILE
+// is missing. Empty/missing files must not silently become deny-all.
+const BuiltinYAML = `roles:
+  admin:
+    permissions: ["*"]
+  manager:
+    permissions:
+      - "media.*"
+      - "storage.*"
+      - "modules.read"
+      - "modules.manage"
+  user:
+    permissions:
+      - "media.request"
+      - "media.view"
+      - "media.search"
+  viewer:
+    permissions:
+      - "media.view"
+      - "media.search"
+`
+
+// Builtin returns the documented default RBAC policy.
+func Builtin() *Policy {
+	p, err := Parse([]byte(BuiltinYAML))
+	if err != nil {
+		panic("policy.Builtin: " + err.Error())
+	}
+	return p
+}
+
 // Config is the top-level RBAC policy configuration.
 type Config struct {
 	Roles map[string]RoleConfig `yaml:"roles"`
@@ -72,6 +103,16 @@ func (p *Policy) IsAllowed(userRoles []string, action, resource string) (bool, s
 		}
 	}
 	return false, "insufficient permissions"
+}
+
+// RoleCount returns the number of defined roles.
+func (p *Policy) RoleCount() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.roles)
 }
 
 // Replace atomically replaces the policy data. Used for SIGHUP reload.

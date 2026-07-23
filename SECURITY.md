@@ -28,6 +28,7 @@ lead to unauthorized system access.
 
 - Passwords hashed with bcrypt (cost 12)
 - Session tokens are SHA-256(random 32 bytes) → hex
-- Tokens never logged (prefix only for audit)
-- Brute-force protection: 6 failures → 1 minute backoff
-- Policy file hot-reloaded on SIGHUP
+- Tokens never logged in full (prefix only in warn logs)
+- Brute-force protection on login UI: 6 attempts → 1 minute backoff per IP
+- RBAC loaded from `AUTH_POLICY_FILE` (builtin defaults if missing); SIGHUP reloads the file
+- Empty policy file (zero roles) is intentional deny-all — not the builtin fallback
