@@ -23,13 +23,13 @@ type Handler struct {
 
 // webUser wraps store.User to implement webauthn.User.
 type webUser struct {
-	store  *authStore.User
-	creds  []webauthn.Credential
+	store *authStore.User
+	creds []webauthn.Credential
 }
 
-func (u *webUser) WebAuthnID() []byte                { return []byte(u.store.ID) }
-func (u *webUser) WebAuthnName() string               { return u.store.Username }
-func (u *webUser) WebAuthnDisplayName() string         { return u.store.Username }
+func (u *webUser) WebAuthnID() []byte                         { return []byte(u.store.ID) }
+func (u *webUser) WebAuthnName() string                       { return u.store.Username }
+func (u *webUser) WebAuthnDisplayName() string                { return u.store.Username }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store) (*Handler, error) {
@@ -44,13 +44,17 @@ func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store)
 	return &Handler{web: web, store: store}, nil
 }
 
-func (h *Handler) Mux() *http.ServeMux {
-	mux := http.NewServeMux()
+// RegisterRoutes mounts WebAuthn API routes on mux.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webauthn/register/begin", h.beginRegistration)
 	mux.HandleFunc("/api/webauthn/register/complete", h.completeRegistration)
 	mux.HandleFunc("/api/webauthn/login/begin", h.beginLogin)
 	mux.HandleFunc("/api/webauthn/login/complete", h.completeLogin)
+}
 
+func (h *Handler) Mux() *http.ServeMux {
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

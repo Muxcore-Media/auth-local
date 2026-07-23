@@ -17,7 +17,7 @@ golangci-lint run
 
 ## PR Process
 
-1. Branch from `main`
+1. Branch from `master`
 2. Keep changes focused — one concern per PR
 3. All tests must pass
 4. Update CHANGELOG.md with your changes

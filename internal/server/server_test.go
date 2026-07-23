@@ -11,6 +11,7 @@ import (
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
+	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -21,7 +22,7 @@ func newTestServer(t *testing.T) *AuthServer {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, nil)
+	return New(s, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
 }
 
 func TestAuthenticate_Password(t *testing.T) {

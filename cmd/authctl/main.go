@@ -26,6 +26,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  rmrole <user> <role>    Remove role from user\n")
 		fmt.Fprintf(os.Stderr, "  totp enable <user>      Enable TOTP for user\n")
 		fmt.Fprintf(os.Stderr, "  totp disable <user>     Disable TOTP for user\n")
+		fmt.Fprintf(os.Stderr, "  totp status <user>      Show TOTP status for user\n")
 		fmt.Fprintf(os.Stderr, "  token create <user> <name>  Create API token\n")
 		fmt.Fprintf(os.Stderr, "  token list <user>       List API tokens\n")
 		fmt.Fprintf(os.Stderr, "  token rm <token-id>     Delete API token\n")
@@ -273,7 +274,7 @@ func cmdRemoveRole(ctx context.Context, client authv1.AuthServiceClient, args []
 
 func cmdTOTP(ctx context.Context, client authv1.AuthServiceClient, args []string) {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: authctl totp enable|disable <user>")
+		fmt.Fprintln(os.Stderr, "usage: authctl totp enable|disable|status <user>")
 		os.Exit(1)
 	}
 	userID := getUserByUsername(ctx, client, args[1])
@@ -305,8 +306,23 @@ func cmdTOTP(ctx context.Context, client authv1.AuthServiceClient, args []string
 		}
 		fmt.Printf("TOTP disabled for %s\n", args[1])
 
+	case "status":
+		resp, err := client.TOTPStatus(ctx, &authv1.TOTPStatusRequest{UserId: userID})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "totp status: %v\n", err)
+			os.Exit(1)
+		}
+		enabled := "off"
+		if resp.Enabled {
+			enabled = "on"
+		}
+		fmt.Printf("TOTP: %s\n", enabled)
+		if resp.VerifiedAt != "" {
+			fmt.Printf("Verified at: %s\n", resp.VerifiedAt)
+		}
+
 	default:
-		fmt.Fprintf(os.Stderr, "usage: authctl totp enable|disable <user>\n")
+		fmt.Fprintf(os.Stderr, "usage: authctl totp enable|disable|status <user>\n")
 		os.Exit(1)
 	}
 }

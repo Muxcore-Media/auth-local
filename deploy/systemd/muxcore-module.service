@@ -1,5 +1,5 @@
 [Unit]
-Description=MuxCore Module - your-module
+Description=MuxCore Module - auth-local
 After=network-online.target
 Wants=network-online.target
 
@@ -7,12 +7,19 @@ Wants=network-online.target
 Type=simple
 User=muxcore
 Group=muxcore
-ExecStart=/usr/local/bin/your-module \
-  --muxcore-mesh-addr localhost:9090 \
-  --muxcore-module-id your-module
+Environment=AUTH_DB_PATH=/var/lib/auth-local/auth.db
+Environment=AUTH_POLICY_FILE=/etc/muxcore/auth-local/policies.yaml
+Environment=AUTH_GRPC_ADDR=:9400
+Environment=AUTH_HTTP_ADDR=:9401
+ExecStart=/usr/local/bin/auth-local \
+  --db-path /var/lib/auth-local/auth.db \
+  --policy-file /etc/muxcore/auth-local/policies.yaml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
+
+; Reload RBAC policy without restart
+ExecReload=/bin/kill -HUP $MAINPID
 
 ; Security hardening
 CapabilityBoundingSet=
@@ -20,7 +27,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/your-module
+ReadWritePaths=/var/lib/auth-local
+ReadOnlyPaths=/etc/muxcore/auth-local
 
 [Install]
 WantedBy=multi-user.target

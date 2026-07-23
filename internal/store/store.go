@@ -39,8 +39,8 @@ type Session struct {
 
 // Store manages users, sessions, and credentials in SQLite.
 type Store struct {
-	db       *sql.DB
-	mu       sync.Mutex
+	db *sql.DB
+	mu sync.Mutex
 }
 
 // New opens or creates the SQLite database and runs migrations.
@@ -260,10 +260,10 @@ func (s *Store) SetRoles(id string, roles []string) error {
 // --- API Tokens ---
 
 type APITokenInfo struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Prefix    string   `json:"prefix"`
-	Scopes    []string `json:"scopes"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Prefix    string    `json:"prefix"`
+	Scopes    []string  `json:"scopes"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -465,12 +465,12 @@ func (s *Store) DisableTOTP(userID string) error {
 // --- WebAuthn ---
 
 type WebAuthnSessionData struct {
-	Challenge   string    `json:"challenge"`
-	UserID      string    `json:"user_id"`
-	AllowedCreds [][]byte `json:"allowed_creds"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	RelyingPartyID string `json:"rp_id"`
-	UserVerification string `json:"user_verification"`
+	Challenge        string    `json:"challenge"`
+	UserID           string    `json:"user_id"`
+	AllowedCreds     [][]byte  `json:"allowed_creds"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	RelyingPartyID   string    `json:"rp_id"`
+	UserVerification string    `json:"user_verification"`
 }
 
 func (s *Store) SaveWebAuthnSession(userID, challenge string, data []byte) error {

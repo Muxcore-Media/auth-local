@@ -2,11 +2,12 @@ package webapp
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -47,22 +48,27 @@ type codeEntry struct {
 }
 
 type Handler struct {
-	store       *authStore.Store
-	authAddr    string
-	rateMu      sync.Mutex
-	rateRecords map[string]*loginRateRecord
-	codesMu     sync.Mutex
-	codes       map[string]*codeEntry
-	stopCh      chan struct{}
+	store          *authStore.Store
+	authAddr       string
+	trustedProxies []net.IPNet
+	rateMu         sync.Mutex
+	rateRecords    map[string]*loginRateRecord
+	codesMu        sync.Mutex
+	codes          map[string]*codeEntry
+	stopCh         chan struct{}
 }
 
-func New(store *authStore.Store, authAddr string) *Handler {
+func New(store *authStore.Store, authAddr string, trustedProxies []net.IPNet) *Handler {
+	if len(trustedProxies) == 0 {
+		trustedProxies = defaultTrustedProxies()
+	}
 	h := &Handler{
-		store:       store,
-		authAddr:    authAddr,
-		rateRecords: make(map[string]*loginRateRecord),
-		codes:       make(map[string]*codeEntry),
-		stopCh:      make(chan struct{}),
+		store:          store,
+		authAddr:       authAddr,
+		trustedProxies: trustedProxies,
+		rateRecords:    make(map[string]*loginRateRecord),
+		codes:          make(map[string]*codeEntry),
+		stopCh:         make(chan struct{}),
 	}
 	go h.rateLimitCleanup()
 	go h.codeCleanup()
@@ -173,7 +179,6 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Admin key check ---
-
 
 func (h *Handler) rateLimitCleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -297,10 +302,10 @@ func (h *Handler) renderTOTP(w http.ResponseWriter, r *http.Request, partialToke
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, map[string]string{
-		"Error":         errMsg,
-		"PartialToken":  partialToken,
-		"Redirect":      redirect,
-		"CSRFToken":     csrfToken,
+		"Error":        errMsg,
+		"PartialToken": partialToken,
+		"Redirect":     redirect,
+		"CSRFToken":    csrfToken,
 	}); err != nil {
 		slog.Error("totp template execute", "error", err)
 	}
@@ -314,7 +319,7 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := extractIP(r)
+	ip := h.extractIP(r)
 	if !h.checkRateLimit(ip) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
@@ -383,7 +388,7 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := extractIP(r)
+	ip := h.extractIP(r)
 	if !h.checkRateLimit(ip) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
@@ -473,16 +478,76 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 }
 
-func extractIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if idx := strings.Index(fwd, ","); idx > 0 {
-			return strings.TrimSpace(fwd[:idx])
-		}
-		return strings.TrimSpace(fwd)
+func (h *Handler) extractIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	host := r.RemoteAddr
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		return host[:idx]
+	if isTrustedProxy(host, h.trustedProxies) {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			if ip := parseRightmostXFF(fwd); ip != "" {
+				return ip
+			}
+		}
 	}
 	return host
+}
+
+func defaultTrustedProxies() []net.IPNet {
+	return []net.IPNet{
+		{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+		{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},
+	}
+}
+
+func isTrustedProxy(addr string, trustedProxies []net.IPNet) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRightmostXFF(xff string) string {
+	parts := strings.Split(xff, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	rightmost := strings.TrimSpace(parts[len(parts)-1])
+	if rightmost == "" {
+		return ""
+	}
+	if ip := net.ParseIP(rightmost); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func ParseTrustedProxies(cidrs []string) []net.IPNet {
+	if len(cidrs) == 0 {
+		return defaultTrustedProxies()
+	}
+	parsed := make([]net.IPNet, 0, len(cidrs)+1)
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			slog.Warn("ignoring invalid trusted proxy CIDR", "cidr", c, "error", err)
+			continue
+		}
+		parsed = append(parsed, *n)
+	}
+	if len(parsed) == 0 {
+		return defaultTrustedProxies()
+	}
+	parsed = append(parsed, net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)})
+	return parsed
 }

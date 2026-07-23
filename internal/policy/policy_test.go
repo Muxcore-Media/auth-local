@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+func TestBuiltin(t *testing.T) {
+	p := Builtin()
+	if p.RoleCount() != 4 {
+		t.Fatalf("RoleCount = %d, want 4", p.RoleCount())
+	}
+	if allowed, _ := p.IsAllowed([]string{"admin"}, "x", "y"); !allowed {
+		t.Error("admin should be allowed")
+	}
+	if allowed, _ := p.IsAllowed([]string{"viewer"}, "view", "media"); !allowed {
+		t.Error("viewer should view media")
+	}
+	if allowed, _ := p.IsAllowed([]string{"viewer"}, "delete", "media"); allowed {
+		t.Error("viewer should not delete media")
+	}
+}
+
 func TestParse_Empty(t *testing.T) {
 	p, err := Parse([]byte(`roles: {}`))
 	if err != nil {
