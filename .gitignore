@@ -1,5 +1,6 @@
 # Binaries
 /auth-local
+/authctl
 /module
 /cmd/module/module
 
