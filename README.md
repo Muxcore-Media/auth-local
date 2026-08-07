@@ -69,7 +69,7 @@ Send `SIGHUP` to reload the policy file without restarting.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTH_GRPC_ADDR` | `:9400` | gRPC listen address |
+| `AUTH_GRPC_ADDR` | `:9403` | gRPC listen address |
 | `AUTH_HTTP_ADDR` | `:9401` | HTTP listen address (login UI, metrics, WebAuthn) |
 | `AUTH_DB_PATH` | `~/.muxcore/auth.db` | SQLite user/session store |
 | `AUTH_POLICY_FILE` | `policies.yaml` | RBAC policy YAML |
@@ -88,7 +88,7 @@ Optional flags mirror env (non-empty flags win over env):
 auth-local \
   --db-path ~/.muxcore/auth.db \
   --policy-file policies.yaml \
-  --grpc-addr :9400 \
+  --grpc-addr :9403 \
   --http-addr :9401 \
   --rp-id localhost \
   --rp-origins http://localhost:9401 \
@@ -123,7 +123,7 @@ authctl token list <user>
 authctl token rm <token-id>
 ```
 
-Flags: `-addr` (default `localhost:9400`), `-token` / `AUTHCTL_TOKEN`.
+Flags: `-addr` (default `localhost:9403`), `-token` / `AUTHCTL_TOKEN`.
 
 ## Implementation
 
