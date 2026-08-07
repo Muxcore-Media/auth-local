@@ -9,7 +9,7 @@ User=muxcore
 Group=muxcore
 Environment=AUTH_DB_PATH=/var/lib/auth-local/auth.db
 Environment=AUTH_POLICY_FILE=/etc/muxcore/auth-local/policies.yaml
-Environment=AUTH_GRPC_ADDR=:9400
+Environment=AUTH_GRPC_ADDR=:9403
 Environment=AUTH_HTTP_ADDR=:9401
 ExecStart=/usr/local/bin/auth-local \
   --db-path /var/lib/auth-local/auth.db \
