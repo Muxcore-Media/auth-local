@@ -86,7 +86,7 @@ func NewModule(cfg Config) *Module {
 	}
 
 	if cfg.GRPCAddr == "" {
-		cfg.GRPCAddr = ":9400"
+		cfg.GRPCAddr = ":9403"
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = ":9401"

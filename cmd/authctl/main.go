@@ -34,7 +34,7 @@ func main() {
 		flag.PrintDefaults()
 	}
 
-	addr := flag.String("addr", "localhost:9400", "auth-local gRPC address")
+	addr := flag.String("addr", "localhost:9403", "auth-local gRPC address")
 	adminToken := flag.String("token", os.Getenv("AUTHCTL_TOKEN"), "Admin API token (or AUTHCTL_TOKEN env var)")
 	flag.Parse()
 
