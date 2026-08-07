@@ -462,8 +462,12 @@ func safeRedirect(r *url.URL, redirect string) string {
 		return redirect
 	}
 	knownHosts := map[string]bool{
-		"localhost:8082": true,
-		"localhost:3000": true,
+		"localhost:8082":  true,
+		"127.0.0.1:8082":  true,
+		"localhost:3000":  true,
+		"127.0.0.1:3000":  true,
+		"localhost:18180": true,
+		"127.0.0.1:18180": true,
 	}
 	if knownHosts[parsed.Host] {
 		return redirect
