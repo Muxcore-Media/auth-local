@@ -17,6 +17,7 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: auth-local
@@ -37,6 +38,7 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: auth-local
@@ -54,6 +56,7 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: auth-local
@@ -75,6 +78,7 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: auth-local
