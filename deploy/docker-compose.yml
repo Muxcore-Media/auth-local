@@ -18,14 +18,14 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "9400:9400"
+      - "9403:9403"
       - "9401:9401"
     environment:
       MUXCORE_GRPC_ADDR: core:9090
       MUXCORE_INSECURE_DISABLE_TLS: "true"
       MUXCORE_LOG_LEVEL: debug
       MUXCORE_MODULE_ID: auth-local
-      AUTH_GRPC_ADDR: ":9400"
+      AUTH_GRPC_ADDR: ":9403"
       AUTH_HTTP_ADDR: ":9401"
       AUTH_DB_PATH: /var/lib/muxcore/auth.db
       AUTH_POLICY_FILE: /etc/muxcore/policies.yaml
