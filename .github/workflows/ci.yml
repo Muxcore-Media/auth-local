@@ -7,8 +7,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -80,6 +78,9 @@ jobs:
         with:
           path: auth-local
       - uses: docker/setup-buildx-action@v3
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -90,4 +91,4 @@ jobs:
           context: .
           file: ./auth-local/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
