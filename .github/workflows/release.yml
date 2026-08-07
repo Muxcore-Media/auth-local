@@ -26,14 +26,19 @@ jobs:
           mkdir -p dist
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/auth-local-linux-amd64 ./cmd/module
           GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/auth-local-linux-arm64 ./cmd/module
+      - name: Lowercase image name
+        run: |
+          echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
           context: ./auth-local
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/auth-local:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/auth-local:latest
+            ghcr.io/${{ env.IMAGE_OWNER }}/auth-local:${{ github.ref_name }}
+            ghcr.io/${{ env.IMAGE_OWNER }}/auth-local:latest
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
