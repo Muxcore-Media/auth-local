@@ -2,16 +2,10 @@ module github.com/Muxcore-Media/auth-local
 
 go 1.26.4
 
-replace github.com/Muxcore-Media/core => ../core
-
-replace github.com/Muxcore-Media/core/sdk/go/module => ../core/sdk/go/module
-
-replace github.com/Muxcore-Media/core/pkg/contracts => ../core/pkg/contracts
-
 require (
-	github.com/Muxcore-Media/core v0.4.0
-	github.com/Muxcore-Media/core/pkg/contracts v0.0.0
-	github.com/Muxcore-Media/core/sdk/go/module v0.1.0
+	github.com/Muxcore-Media/core v0.5.0
+	github.com/Muxcore-Media/core/pkg/contracts v0.5.0
+	github.com/Muxcore-Media/core/sdk/go/module v0.5.0
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.54.0
