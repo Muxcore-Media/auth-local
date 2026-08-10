@@ -3,13 +3,13 @@ module github.com/Muxcore-Media/auth-local
 go 1.26.4
 
 require (
-	github.com/Muxcore-Media/core v0.5.0
-	github.com/Muxcore-Media/core/pkg/contracts v0.5.0
-	github.com/Muxcore-Media/core/sdk/go/module v0.5.0
+	github.com/Muxcore-Media/core v0.5.1
+	github.com/Muxcore-Media/core/pkg/contracts v0.5.1
+	github.com/Muxcore-Media/core/sdk/go/module v0.5.1
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.54.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.53.0
 )
