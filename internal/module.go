@@ -156,11 +156,11 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Auth Local",
-		Version:      "0.1.4",
+		Version:      "0.1.5",
 		Roles:        []string{"security"},
 		Description:  "Local authentication and authorization provider",
 		Author:       "MuxCore",
-		Capabilities: []string{contracts.CapabilityAuth, contracts.CapabilityAuthorizer, contracts.CapabilityIdentity},
+		Capabilities: []string{contracts.CapabilityAuth, contracts.CapabilityAuthorizer, contracts.CapabilityIdentity, "settings"},
 		HTTPAddr:     m.grpcAddr,
 	}
 }

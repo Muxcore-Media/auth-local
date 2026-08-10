@@ -1,7 +1,7 @@
 {
   "name": "Auth Local",
   "description": "Local authentication and authorization. Provides AuthProvider, Authorizer, and IdentityProvider with local user storage and RBAC.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "MuxCore",
   "roles": [
     "security",
@@ -10,7 +10,8 @@
   "capabilities": [
     "auth",
     "authorizer",
-    "identity"
+    "identity",
+    "settings"
   ],
   "contracts": []
 }
