@@ -76,6 +76,13 @@ func (s *AuthServer) SetPolicy(p *policy.Policy) {
 	slog.Info("RBAC policy reloaded")
 }
 
+// SetRelyingParty updates WebAuthn / TOTP RP metadata used by gRPC helpers.
+func (s *AuthServer) SetRelyingParty(rpID string, rpOrigins []string, rpName string) {
+	s.rpID = rpID
+	s.rpOrigins = rpOrigins
+	s.rpName = rpName
+}
+
 func (s *AuthServer) Authenticate(ctx context.Context, req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
 	switch req.CredentialType {
 	case "password":
