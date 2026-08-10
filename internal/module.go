@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -21,6 +22,7 @@ import (
 	"github.com/Muxcore-Media/auth-local/internal/webapp"
 	"github.com/Muxcore-Media/auth-local/internal/webauthn"
 	"github.com/Muxcore-Media/core/pkg/contracts"
+	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
 )
 
 type Module struct {
@@ -35,6 +37,7 @@ type Module struct {
 	sighupCh       chan os.Signal
 	sighupStop     chan struct{}
 	sighupDone     chan struct{}
+	cfgMu          sync.RWMutex
 	id             string
 	grpcAddr       string
 	httpAddr       string
@@ -153,7 +156,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Auth Local",
-		Version:      "0.1.3",
+		Version:      "0.1.4",
 		Roles:        []string{"security"},
 		Description:  "Local authentication and authorization provider",
 		Author:       "MuxCore",
@@ -229,12 +232,15 @@ func (m *Module) ReloadPolicy() error {
 	if m.authSrv == nil {
 		return fmt.Errorf("not initialized")
 	}
-	pol, err := policy.Load(m.policyFile)
+	m.cfgMu.RLock()
+	path := m.policyFile
+	m.cfgMu.RUnlock()
+	pol, err := policy.Load(path)
 	if err != nil {
 		return err
 	}
 	if pol.RoleCount() == 0 {
-		slog.Warn("reloaded policy has no roles — all Can() checks deny", "file", m.policyFile)
+		slog.Warn("reloaded policy has no roles — all Can() checks deny", "file", path)
 	}
 	m.authSrv.SetPolicy(pol)
 	return nil
@@ -243,6 +249,7 @@ func (m *Module) ReloadPolicy() error {
 func (m *Module) Start(ctx context.Context) error {
 	m.grpcSrv = grpc.NewServer()
 	m.authSrv.RegisterWithGRPC(m.grpcSrv)
+	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 	go func() {
 		slog.Info("auth-local gRPC started", "addr", m.grpcAddr)
 		if err := m.grpcSrv.Serve(m.grpcLis); err != nil {
