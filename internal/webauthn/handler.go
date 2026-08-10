@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -17,8 +18,8 @@ import (
 
 // Handler provides HTTP endpoints for WebAuthn registration and authentication.
 type Handler struct {
-	web   *webauthn.WebAuthn
-	store *authStore.Store
+	webPtr atomic.Pointer[webauthn.WebAuthn]
+	store  *authStore.Store
 }
 
 // webUser wraps store.User to implement webauthn.User.
@@ -33,15 +34,29 @@ func (u *webUser) WebAuthnDisplayName() string                { return u.store.U
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store) (*Handler, error) {
+	h := &Handler{store: store}
+	if err := h.Reconfigure(rpID, rpOrigins, rpName); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+// Reconfigure rebuilds the WebAuthn RP config for live settings updates.
+func (h *Handler) Reconfigure(rpID string, rpOrigins []string, rpName string) error {
 	web, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: rpName,
 		RPID:          rpID,
 		RPOrigins:     rpOrigins,
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return &Handler{web: web, store: store}, nil
+	h.webPtr.Store(web)
+	return nil
+}
+
+func (h *Handler) web() *webauthn.WebAuthn {
+	return h.webPtr.Load()
 }
 
 // RegisterRoutes mounts WebAuthn API routes on mux.
@@ -117,7 +132,7 @@ func (h *Handler) beginRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	options, sessionData, err := h.web.BeginRegistration(user)
+	options, sessionData, err := h.web().BeginRegistration(user)
 	if err != nil {
 		slog.Error("webauthn: begin registration", "error", err)
 		writeError(w, http.StatusInternalServerError, "registration failed")
@@ -159,7 +174,7 @@ func (h *Handler) completeRegistration(w http.ResponseWriter, r *http.Request) {
 	}
 	h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
-	credential, err := h.web.FinishRegistration(user, sessionData, r)
+	credential, err := h.web().FinishRegistration(user, sessionData, r)
 	if err != nil {
 		slog.Error("webauthn: finish registration", "error", err)
 		writeError(w, http.StatusBadRequest, "registration verification failed")
@@ -184,7 +199,7 @@ func (h *Handler) beginLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	options, sessionData, err := h.web.BeginLogin(user)
+	options, sessionData, err := h.web().BeginLogin(user)
 	if err != nil {
 		slog.Error("webauthn: begin login", "error", err)
 		writeError(w, http.StatusInternalServerError, "login initiation failed")
@@ -236,7 +251,7 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	credential, err := h.web.FinishLogin(user, sessionData, r)
+	credential, err := h.web().FinishLogin(user, sessionData, r)
 	if err != nil {
 		slog.Error("webauthn: finish login", "error", err)
 		writeError(w, http.StatusUnauthorized, "authentication failed")
@@ -344,7 +359,7 @@ func (h *Handler) beginAdminRegistration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	options, sessionData, err := h.web.BeginRegistration(user)
+	options, sessionData, err := h.web().BeginRegistration(user)
 	if err != nil {
 		slog.Error("webauthn: begin admin registration", "error", err)
 		writeError(w, http.StatusInternalServerError, "registration failed")
@@ -392,7 +407,7 @@ func (h *Handler) completeAdminRegistration(w http.ResponseWriter, r *http.Reque
 	}
 	h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
-	credential, err := h.web.FinishRegistration(user, sessionData, r)
+	credential, err := h.web().FinishRegistration(user, sessionData, r)
 	if err != nil {
 		slog.Error("webauthn: finish admin registration", "error", err)
 		writeError(w, http.StatusBadRequest, "registration verification failed")
