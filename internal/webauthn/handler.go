@@ -13,6 +13,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/Muxcore-Media/auth-local/internal/redirectallow"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -431,14 +432,7 @@ func safeRedirectURL(r *http.Request, redirect string) string {
 	if !parsed.IsAbs() {
 		return redirect
 	}
-	if parsed.Host == r.Host {
-		return redirect
-	}
-	knownHosts := map[string]bool{
-		"localhost:8082": true,
-		"localhost:3000": true,
-	}
-	if knownHosts[parsed.Host] {
+	if redirectallow.HostAllowed(r.Host, parsed.Host) {
 		return redirect
 	}
 	return "/"
