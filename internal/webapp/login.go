@@ -16,6 +16,7 @@ import (
 
 	"github.com/pquerna/otp/totp"
 
+	"github.com/Muxcore-Media/auth-local/internal/redirectallow"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -458,20 +459,7 @@ func safeRedirect(r *url.URL, redirect string) string {
 	if !parsed.IsAbs() {
 		return redirect
 	}
-	if parsed.Host == r.Host {
-		return redirect
-	}
-	knownHosts := map[string]bool{
-		"localhost:8082":  true,
-		"127.0.0.1:8082":  true,
-		"localhost:5173":  true, // media-ui-app / mediauiprox MVP
-		"127.0.0.1:5173":  true,
-		"localhost:3000":  true,
-		"127.0.0.1:3000":  true,
-		"localhost:18180": true,
-		"127.0.0.1:18180": true,
-	}
-	if knownHosts[parsed.Host] {
+	if redirectallow.HostAllowed(r.Host, parsed.Host) {
 		return redirect
 	}
 	return "/"
