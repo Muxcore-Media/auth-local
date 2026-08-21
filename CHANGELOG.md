@@ -1,6 +1,18 @@
 # Changelog
 
 
+## [0.1.7] — 2026-08-20
+
+### Added
+- Wizarr-style invite links: create/list/revoke via `GET|POST /api/invites`, `DELETE /api/invites/{id}`; redeem at `/invite?token=` and `POST /invite/redeem`.
+- Invites are time-limited, single-use or max-uses (0 = unlimited), optional role.
+
+## [0.1.6] — 2026-08-20
+
+### Fixed
+- `Can` for service module caller IDs (not DB users) evaluates RBAC as role `module` instead of deny-all — required for mesh StorageService from downloaders/indexers.
+- Builtin RBAC includes `module: ["*"]`.
+
 ## [0.1.5] — 2026-08-10
 
 ### Changed

@@ -23,6 +23,10 @@ import (
 //go:embed login.html totp.html
 var pageHTML embed.FS
 
+// authCSRFCookie must not share a name with admin-ui's csrf-token: browsers do not
+// isolate cookies by port, so admin GETs would overwrite the login double-submit token.
+const authCSRFCookie = "muxcore-auth-csrf"
+
 func generateCSRFToken() string {
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -86,6 +90,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/login/password", h.passwordLogin)
 	mux.HandleFunc("/login/totp", h.totpLogin)
 	mux.HandleFunc("/login/exchange", h.exchangeHandler)
+	h.RegisterInviteRoutes(mux)
 }
 
 // --- One-time code exchange (replaces token in URL) ---
@@ -172,10 +177,12 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"token":    sessToken,
-		"user_id":  user.ID,
-		"username": user.Username,
-		"roles":    user.Roles,
+		"token":     sessToken,
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"roles":     user.Roles,
+		"tenant_id": user.TenantID,
+		"claims":    user.Claims(),
 	})
 }
 
@@ -258,10 +265,12 @@ func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, errMsg str
 	}
 
 	csrfToken := generateCSRFToken()
+	// Distinct from admin-ui's "csrf-token": cookies are not port-scoped, so a
+	// shared name lets admin GETs overwrite the auth login token mid-form.
 	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf-token",
+		Name:     authCSRFCookie,
 		Value:    csrfToken,
-		Path:     "/",
+		Path:     "/login",
 		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
@@ -287,9 +296,9 @@ func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, errMsg str
 func (h *Handler) renderTOTP(w http.ResponseWriter, r *http.Request, partialToken, redirect, errMsg string) {
 	csrfToken := generateCSRFToken()
 	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf-token",
+		Name:     authCSRFCookie,
 		Value:    csrfToken,
-		Path:     "/",
+		Path:     "/login",
 		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
@@ -332,7 +341,7 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieCSRF, _ := r.Cookie("csrf-token")
+	cookieCSRF, _ := r.Cookie(authCSRFCookie)
 	formCSRF := r.FormValue("csrf_token")
 	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
 		h.renderLogin(w, r, "Invalid form token — please reload and try again")
@@ -401,7 +410,7 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieCSRF, _ := r.Cookie("csrf-token")
+	cookieCSRF, _ := r.Cookie(authCSRFCookie)
 	formCSRF := r.FormValue("csrf_token")
 	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
 		h.renderTOTP(w, r, "", "", "Invalid form token — please reload and try again")

@@ -146,6 +146,7 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 		UserId:        user.ID,
 		Username:      user.Username,
 		Roles:         user.Roles,
+		TenantId:      user.TenantID,
 	}, nil
 }
 
@@ -216,6 +217,7 @@ func (s *AuthServer) authTOTP(req *authv1.AuthenticateRequest) (*authv1.Authenti
 		UserId:        user.ID,
 		Username:      user.Username,
 		Roles:         user.Roles,
+		TenantId:      user.TenantID,
 	}, nil
 }
 
@@ -252,6 +254,7 @@ func (s *AuthServer) authAPIKey(req *authv1.AuthenticateRequest) (*authv1.Authen
 		UserId:        user.ID,
 		Username:      user.Username,
 		Roles:         user.Roles,
+		TenantId:      user.TenantID,
 	}, nil
 }
 
@@ -274,6 +277,7 @@ func (s *AuthServer) Validate(ctx context.Context, req *authv1.ValidateRequest) 
 		UserId:   user.ID,
 		Username: user.Username,
 		Roles:    user.Roles,
+		TenantId: user.TenantID,
 	}, nil
 }
 
@@ -283,15 +287,20 @@ func (s *AuthServer) Revoke(ctx context.Context, req *authv1.RevokeRequest) (*au
 }
 
 func (s *AuthServer) Can(ctx context.Context, req *authv1.CanRequest) (*authv1.CanResponse, error) {
+	var roles []string
 	user, err := s.store.GetUser(req.UserId)
-	if err != nil {
-		return &authv1.CanResponse{Allowed: false, Reason: "user not found"}, nil
+	if err == nil {
+		roles = user.Roles
+	} else {
+		// Service modules authenticate via x-caller-id (not a DB user). ExtractIdentity
+		// assigns role "module"; evaluate RBAC against that instead of deny-all.
+		roles = []string{"module"}
 	}
 
 	var allowed bool
 	var reason string
 	if s.policy != nil {
-		allowed, reason = s.policy.IsAllowed(user.Roles, req.Action, req.Resource)
+		allowed, reason = s.policy.IsAllowed(roles, req.Action, req.Resource)
 	} else {
 		allowed, reason = false, "no policy loaded"
 	}
@@ -309,10 +318,11 @@ func (s *AuthServer) ExtractIdentity(ctx context.Context, req *authv1.ExtractIde
 			user, err := s.store.GetUser(sess.UserID)
 			if err == nil {
 				return &authv1.ExtractIdentityResponse{
-					Found: true,
-					Id:    user.ID,
-					Kind:  "user",
-					Roles: user.Roles,
+					Found:    true,
+					Id:       user.ID,
+					Kind:     "user",
+					Roles:    user.Roles,
+					TenantId: user.TenantID,
 				}, nil
 			}
 		}
@@ -426,6 +436,7 @@ func (s *AuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersRequest
 			Username:    u.Username,
 			Roles:       u.Roles,
 			TotpEnabled: totpEnabled,
+			TenantId:    u.TenantID,
 		})
 	}
 	return &authv1.ListUsersResponse{Users: infos}, nil
