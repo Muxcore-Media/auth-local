@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,9 +25,27 @@ type User struct {
 	Username    string    `json:"username"`
 	Password    string    `json:"-"`
 	Roles       []string  `json:"roles"`
+	TenantID    string    `json:"tenant_id,omitempty"`
 	TOTPSecret  string    `json:"-"`
 	TOTPEnabled bool      `json:"totp_enabled"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Claims returns auth claim map for session/JWT-style consumers (tenant.FromClaims).
+func (u *User) Claims() map[string]any {
+	if u == nil {
+		return map[string]any{}
+	}
+	m := map[string]any{
+		"sub":      u.ID,
+		"user_id":  u.ID,
+		"username": u.Username,
+		"roles":    append([]string(nil), u.Roles...),
+	}
+	if tid := strings.TrimSpace(u.TenantID); tid != "" {
+		m["tenant_id"] = tid
+	}
+	return m
 }
 
 // Session represents an authenticated session.
@@ -120,6 +139,28 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate query: %w", err)
 		}
 	}
+	if err := s.migrateInvites(); err != nil {
+		return err
+	}
+	if err := s.migrateTenantColumns(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) migrateTenantColumns() error {
+	for _, q := range []string{
+		`ALTER TABLE users ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE invites ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+				continue
+			}
+			return fmt.Errorf("migrate tenant columns: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -129,6 +170,11 @@ func (s *Store) Close() error { return s.db.Close() }
 // --- User CRUD ---
 
 func (s *Store) CreateUser(username, password string) (*User, error) {
+	return s.CreateUserTenant(username, password, "")
+}
+
+// CreateUserTenant creates a user bound to tenantID (empty = single-household / unset).
+func (s *Store) CreateUserTenant(username, password, tenantID string) (*User, error) {
 	if username == "" {
 		return nil, fmt.Errorf("username is required")
 	}
@@ -140,16 +186,18 @@ func (s *Store) CreateUser(username, password string) (*User, error) {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 	id := newID()
+	tenantID = strings.TrimSpace(tenantID)
 	user := &User{
 		ID:       id,
 		Username: username,
 		Password: string(hash),
 		Roles:    []string{"user"},
+		TenantID: tenantID,
 	}
 	rolesJSON, _ := json.Marshal(user.Roles)
 	_, err = s.db.Exec(
-		`INSERT INTO users (id, username, password, roles) VALUES (?, ?, ?, ?)`,
-		id, username, string(hash), string(rolesJSON),
+		`INSERT INTO users (id, username, password, roles, tenant_id) VALUES (?, ?, ?, ?, ?)`,
+		id, username, string(hash), string(rolesJSON), tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
@@ -159,33 +207,25 @@ func (s *Store) CreateUser(username, password string) (*User, error) {
 
 func (s *Store) GetUserByUsername(username string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password, roles, totp_secret, totp_enabled, created_at FROM users WHERE username = ?`,
+		`SELECT id, username, password, roles, COALESCE(tenant_id,''), totp_secret, totp_enabled, created_at FROM users WHERE username = ?`,
 		username,
 	)
-	var u User
-	var rolesJSON, totpSecret, createdAtStr string
-	var totpEnabled int
-	if err := row.Scan(&u.ID, &u.Username, &u.Password, &rolesJSON, &totpSecret, &totpEnabled, &createdAtStr); err != nil {
-		return nil, fmt.Errorf("user not found: %w", err)
-	}
-	if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
-		slog.Warn("corrupt roles data for user", "user_id", u.ID, "error", err)
-	}
-	u.TOTPSecret = totpSecret
-	u.TOTPEnabled = totpEnabled == 1
-	u.CreatedAt = parseTime(createdAtStr)
-	return &u, nil
+	return scanUser(row)
 }
 
 func (s *Store) GetUser(id string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, password, roles, totp_secret, totp_enabled, created_at FROM users WHERE id = ?`,
+		`SELECT id, username, password, roles, COALESCE(tenant_id,''), totp_secret, totp_enabled, created_at FROM users WHERE id = ?`,
 		id,
 	)
+	return scanUser(row)
+}
+
+func scanUser(row *sql.Row) (*User, error) {
 	var u User
 	var rolesJSON, totpSecret, createdAtStr string
 	var totpEnabled int
-	if err := row.Scan(&u.ID, &u.Username, &u.Password, &rolesJSON, &totpSecret, &totpEnabled, &createdAtStr); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Password, &rolesJSON, &u.TenantID, &totpSecret, &totpEnabled, &createdAtStr); err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
 	if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
@@ -198,7 +238,7 @@ func (s *Store) GetUser(id string) (*User, error) {
 }
 
 func (s *Store) ListUsers() ([]*User, error) {
-	rows, err := s.db.Query(`SELECT id, username, roles, created_at FROM users ORDER BY username`)
+	rows, err := s.db.Query(`SELECT id, username, roles, COALESCE(tenant_id,''), created_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +248,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	for rows.Next() {
 		var u User
 		var rolesJSON, createdAtStr string
-		if err := rows.Scan(&u.ID, &u.Username, &rolesJSON, &createdAtStr); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &rolesJSON, &u.TenantID, &createdAtStr); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
@@ -218,6 +258,12 @@ func (s *Store) ListUsers() ([]*User, error) {
 		users = append(users, &u)
 	}
 	return users, nil
+}
+
+// SetTenantID updates a user's tenant binding.
+func (s *Store) SetTenantID(id, tenantID string) error {
+	_, err := s.db.Exec(`UPDATE users SET tenant_id = ? WHERE id = ?`, strings.TrimSpace(tenantID), id)
+	return err
 }
 
 func (s *Store) DeleteUser(id string) error {

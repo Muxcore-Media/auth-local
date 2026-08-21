@@ -29,6 +29,8 @@ const BuiltinYAML = `roles:
     permissions:
       - "media.view"
       - "media.search"
+  module:
+    permissions: ["*"]
 `
 
 // Builtin returns the documented default RBAC policy.

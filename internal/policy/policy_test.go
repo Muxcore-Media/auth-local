@@ -8,8 +8,11 @@ import (
 
 func TestBuiltin(t *testing.T) {
 	p := Builtin()
-	if p.RoleCount() != 4 {
-		t.Fatalf("RoleCount = %d, want 4", p.RoleCount())
+	if p.RoleCount() != 5 {
+		t.Fatalf("RoleCount = %d, want 5", p.RoleCount())
+	}
+	if allowed, _ := p.IsAllowed([]string{"module"}, "/muxcore.storage.v1.StorageService/Put", "*"); !allowed {
+		t.Error("module role should allow storage Put")
 	}
 	if allowed, _ := p.IsAllowed([]string{"admin"}, "x", "y"); !allowed {
 		t.Error("admin should be allowed")

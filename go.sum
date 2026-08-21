@@ -1,9 +1,3 @@
-github.com/Muxcore-Media/core v0.5.2 h1:nZtYUSBcmCdOQBXpPvtsbpRnuDoVLlI3ORcvwGsotTg=
-github.com/Muxcore-Media/core v0.5.2/go.mod h1:dPC03/h+ap/geLApar3OA3OM7S+gZtF4Qbl5Vo+oPfg=
-github.com/Muxcore-Media/core/pkg/contracts v0.5.2 h1:PbeNCUesxJiXK1Kbhsbf7ffY95zBD6sRGj5qY0jmd3Y=
-github.com/Muxcore-Media/core/pkg/contracts v0.5.2/go.mod h1:gbI+28IlviQlGYYoQj2DJVet/5LXLQtjFeSRo0a+8BI=
-github.com/Muxcore-Media/core/sdk/go/module v0.5.2 h1:QsYEA0Hzz2JJO606J/Tns+Aa2mmucEPEADghgQqP0aw=
-github.com/Muxcore-Media/core/sdk/go/module v0.5.2/go.mod h1:R7aeTKJwVkHTcR4RSkN7pYv0ve+5EjqoOnT/BbIKBtQ=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc h1:biVzkmvwrH8WK8raXaxBx6fRVTlJILwEwQGL1I/ByEI=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc/go.mod h1:paBWMcWSl3LHKBqUq+rly7CNSldXjb2rDl3JlRe0mD8=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

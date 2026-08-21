@@ -1,13 +1,18 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-gray-950">
+<html lang="en" class="h-full">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>MuxCore Auth</title>
 <style>
-*,:after,:before{box-sizing:border-box;border:0 solid #e5e7eb}
-html{font-family:ui-sans-serif,system-ui,sans-serif;font-size:14px}
-body{margin:0;min-height:100vh}
+*,:after,:before{box-sizing:border-box;border:0 solid #23252b}
+html{font-family:"Inter","IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:14px;color-scheme:dark}
+body{margin:0;min-height:100vh;color:#f5f5f7;
+background:
+  radial-gradient(1200px 600px at 8% -10%, rgba(61,184,168,.12) 0%, transparent 55%),
+  radial-gradient(900px 500px at 100% 0%, rgba(245,166,35,.08) 0%, transparent 50%),
+  #0b0c0f;
+}
 .flex{display:flex}.items-center{align-items:center}.justify-center{justify-content:center}
 .text-center{text-align:center}.w-full{width:100%}
 .max-w-sm{max-width:24rem}.mx-auto{margin:0 auto}
@@ -19,24 +24,26 @@ body{margin:0;min-height:100vh}
 .space-y-4>*+*{margin-top:1rem}
 .text-xs{font-size:.75rem}.text-sm{font-size:.875rem}.text-xl{font-size:1.25rem}.text-2xl{font-size:1.5rem}
 .font-medium{font-weight:500}.font-semibold{font-weight:600}.font-bold{font-weight:700}
-.text-white{color:#f3f4f6}.text-gray-300{color:#d1d5db}.text-gray-400{color:#9ca3af}.text-gray-500{color:#6b7280}
-.text-red-400{color:#f87171}.text-green-400{color:#34d399}
-.bg-gray-950{background:#030712}.bg-gray-900{background:#111827}.bg-gray-800{background:#1f2937}
-.bg-indigo-600{background:#4f46e5}
-.border{border-width:1px}.border-gray-800{border-color:#1f2937}.border-gray-700{border-color:#374151}
-.rounded-lg{border-radius:.5rem}.rounded-xl{border-radius:.75rem}
-.hover\:bg-indigo-500:hover{background:#6366f1}
-.focus\:outline-none:focus{outline:0}.focus\:ring-1:focus{box-shadow:0 0 0 1px #4f46e5}
-.transition-colors{transition-property:color,background-color,border-color}
+.text-white{color:#f5f5f7}.text-gray-300{color:#c7c8cc}.text-gray-400{color:#a1a1aa}.text-gray-500{color:#6b6b73}
+.text-red-400{color:#f87171}.text-green-400{color:#3ddc84}
+.bg-gray-950{background:#0b0c0f}.bg-gray-900{background:#15161b}.bg-gray-800{background:#1c1e26}
+.bg-indigo-600{background:#3db8a8}
+.border{border-width:1px}.border-gray-800{border-color:#23252b}.border-gray-700{border-color:#23252b}
+.rounded-lg{border-radius:10px}.rounded-xl{border-radius:12px}
+.hover\:bg-indigo-500:hover{background:#56d0c0}
+.focus\:outline-none:focus{outline:0}.focus\:ring-1:focus{box-shadow:0 0 0 1px #3db8a8}
+.transition-colors{transition:color .15s,background-color .15s,border-color .15s}
 .cursor-pointer{cursor:pointer}.antialiased{-webkit-font-smoothing:antialiased}
 .w-12{width:3rem}.h-12{height:3rem}
 .block{display:block}.hidden{display:none}
+a{color:#3db8a8}
+:focus-visible{outline:2px solid #3db8a8;outline-offset:2px}
 </style>
 </head>
 <body class="flex items-center justify-center antialiased">
 <div class="w-full max-w-sm p-8">
 <div class="text-center mb-8">
-<div class="mx-auto w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center text-xl font-bold mb-4">M</div>
+<div class="mx-auto w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center text-xl font-bold mb-4" style="color:#0b0c0f">M</div>
 <h1 class="text-2xl font-bold text-white">MuxCore Auth</h1>
 <p class="text-gray-400 mt-1 text-sm">Sign in to continue</p>
 </div>
@@ -64,7 +71,7 @@ placeholder="password"/>
 <div id="passkey-section" class="hidden"></div>
 
 <button type="submit"
-class="w-full rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors cursor-pointer">
+class="w-full rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold hover:bg-indigo-500 transition-colors cursor-pointer" style="color:#0b0c0f">
 Sign in
 </button>
 </form>
@@ -72,7 +79,8 @@ Sign in
 {{if .HasPasskeys}}
 <div class="mt-4 text-center">
 <button id="passkey-login-btn"
-class="text-sm text-indigo-400 hover:text-indigo-300 cursor-pointer"
+class="text-sm cursor-pointer"
+style="color:#3db8a8;background:none;border:0"
 onclick="beginPasskeyLogin()">Sign in with passkey</button>
 </div>
 {{end}}
