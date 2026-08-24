@@ -242,7 +242,7 @@ func (s *Store) ListUsers() ([]*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var users []*User
 	for rows.Next() {
@@ -273,10 +273,16 @@ func (s *Store) DeleteUser(id string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, id)
-	tx.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, id)
-	tx.Exec(`DELETE FROM api_tokens WHERE user_id = ?`, id)
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM api_tokens WHERE user_id = ?`, id); err != nil {
+		return err
+	}
 	result, err := tx.Exec(`DELETE FROM users WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -358,7 +364,7 @@ func (s *Store) ValidateAPIToken(rawToken string) (*Session, error) {
 	}
 
 	// Update last_used.
-	s.db.Exec(`UPDATE api_tokens SET last_used = datetime('now') WHERE id = ?`, tokenID)
+	_, _ = s.db.Exec(`UPDATE api_tokens SET last_used = datetime('now') WHERE id = ?`, tokenID)
 	return sess, nil
 }
 
@@ -370,7 +376,7 @@ func (s *Store) ListAPITokens(userID string) ([]*APITokenInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tokens []*APITokenInfo
 	for rows.Next() {
@@ -379,7 +385,9 @@ func (s *Store) ListAPITokens(userID string) ([]*APITokenInfo, error) {
 		if err := rows.Scan(&t.ID, &t.Name, &t.Prefix, &scopesJSON, &createdAtStr); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(scopesJSON), &t.Scopes)
+		if err := json.Unmarshal([]byte(scopesJSON), &t.Scopes); err != nil {
+			slog.Warn("corrupt scopes data for API token", "token_id", t.ID, "error", err)
+		}
 		t.CreatedAt = parseTime(createdAtStr)
 		tokens = append(tokens, t)
 	}
@@ -440,11 +448,11 @@ func (s *Store) GetSession(token string) (*Session, error) {
 	sess.ExpiresAt = parseTime(expiresAt)
 	if sess.ExpiresAt.IsZero() {
 		slog.Warn("session has unparseable expiration, treating as expired", "token", sess.Token[:8])
-		s.DeleteSession(token)
+		_ = s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
 	if time.Now().After(sess.ExpiresAt) {
-		s.DeleteSession(token)
+		_ = s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
 	return &sess, nil
@@ -469,7 +477,7 @@ func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
 		return nil, fmt.Errorf("session is not a partial token")
 	}
 	// Delete the partial session, create a full one.
-	s.db.Exec(`DELETE FROM sessions WHERE token = ?`, partialToken)
+	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, partialToken)
 	return s.CreateFullSession(sess.UserID)
 }
 
@@ -561,7 +569,7 @@ func (s *Store) ListWebAuthnCredentials(userID string) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var creds [][]byte
 	for rows.Next() {
@@ -591,7 +599,7 @@ func (s *Store) ListWebAuthnCredentialMeta(userID string) ([]WebAuthnCredentialI
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var infos []WebAuthnCredentialInfo
 	for rows.Next() {
@@ -626,7 +634,7 @@ func (s *Store) DeleteAllWebAuthnCredentials(userID string) error {
 // SessionCount returns the number of active (non-expired) sessions.
 func (s *Store) SessionCount() int {
 	var count int
-	s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE expires_at > datetime('now')`).Scan(&count)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE expires_at > datetime('now')`).Scan(&count)
 	return count
 }
 
