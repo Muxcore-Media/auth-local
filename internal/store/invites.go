@@ -119,7 +119,7 @@ func (s *Store) ListInvites() ([]*Invite, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []*Invite
 	for rows.Next() {
 		inv, err := scanInvite(rows)
@@ -167,7 +167,7 @@ func (s *Store) RedeemInvite(rawToken, username, password string) (*User, *Invit
 	if err != nil {
 		return nil, nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	row := tx.QueryRow(`
 		SELECT id, prefix, created_by, role, COALESCE(tenant_id,''), max_uses, use_count, expires_at, revoked_at, created_at

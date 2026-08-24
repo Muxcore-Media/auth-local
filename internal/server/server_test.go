@@ -21,13 +21,13 @@ func newTestServer(t *testing.T) *AuthServer {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return New(s, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
 }
 
 func TestAuthenticate_Password(t *testing.T) {
 	srv := newTestServer(t)
-	srv.store.CreateUser("alice", "password123")
+	_, _ = srv.store.CreateUser("alice", "password123")
 
 	creds, _ := json.Marshal(map[string]string{
 		"username": "alice",
@@ -50,7 +50,7 @@ func TestAuthenticate_Password(t *testing.T) {
 
 func TestAuthenticate_WrongPassword(t *testing.T) {
 	srv := newTestServer(t)
-	srv.store.CreateUser("alice", "correct")
+	_, _ = srv.store.CreateUser("alice", "correct")
 
 	creds, _ := json.Marshal(map[string]string{
 		"username": "alice",
@@ -70,7 +70,7 @@ func TestAuthenticate_WrongPassword(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	srv := newTestServer(t)
-	srv.store.CreateUser("alice", "pw")
+	_, _ = srv.store.CreateUser("alice", "pw")
 	user, _ := srv.store.GetUserByUsername("alice")
 	sess, _ := srv.store.CreateFullSession(user.ID)
 
@@ -99,11 +99,11 @@ func TestValidate_Invalid(t *testing.T) {
 
 func TestRevoke(t *testing.T) {
 	srv := newTestServer(t)
-	srv.store.CreateUser("alice", "pw")
+	_, _ = srv.store.CreateUser("alice", "pw")
 	user, _ := srv.store.GetUserByUsername("alice")
 	sess, _ := srv.store.CreateFullSession(user.ID)
 
-	srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
+	_, _ = srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
 	resp, _ := srv.Validate(context.Background(), &authv1.ValidateRequest{Token: sess.Token})
 	if resp.Valid {
 		t.Fatal("expected session to be revoked")
@@ -112,9 +112,9 @@ func TestRevoke(t *testing.T) {
 
 func TestCan(t *testing.T) {
 	srv := newTestServer(t)
-	srv.store.CreateUser("alice", "pw")
+	_, _ = srv.store.CreateUser("alice", "pw")
 	user, _ := srv.store.GetUserByUsername("alice")
-	srv.store.SetRoles(user.ID, []string{"admin"})
+	_ = srv.store.SetRoles(user.ID, []string{"admin"})
 
 	resp, err := srv.Can(context.Background(), &authv1.CanRequest{
 		UserId:   user.ID,
@@ -128,7 +128,7 @@ func TestCan(t *testing.T) {
 		t.Fatal("expected admin to have permission")
 	}
 
-	srv.store.SetRoles(user.ID, []string{"viewer"})
+	_ = srv.store.SetRoles(user.ID, []string{"viewer"})
 	resp2, _ := srv.Can(context.Background(), &authv1.CanRequest{
 		UserId:   user.ID,
 		Action:   "delete",
@@ -141,7 +141,7 @@ func TestCan(t *testing.T) {
 
 func TestExtractIdentity(t *testing.T) {
 	srv := newTestServer(t)
-	srv.store.CreateUser("alice", "pw")
+	_, _ = srv.store.CreateUser("alice", "pw")
 	user, _ := srv.store.GetUserByUsername("alice")
 	sess, _ := srv.store.CreateFullSession(user.ID)
 
@@ -285,14 +285,14 @@ func TestTOTP_InvalidCode(t *testing.T) {
 func TestDisableTOTP(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
-	srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	_, _ = srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
 
 	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if !status.Enabled {
 		t.Fatal("expected TOTP enabled before disable")
 	}
 
-	srv.DisableTOTP(context.Background(), &authv1.DisableTOTPRequest{UserId: user.ID})
+	_, _ = srv.DisableTOTP(context.Background(), &authv1.DisableTOTPRequest{UserId: user.ID})
 
 	status, _ = srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if status.Enabled {

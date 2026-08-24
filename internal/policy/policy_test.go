@@ -132,11 +132,13 @@ roles:
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.yaml")
-	os.WriteFile(path, []byte(`
+	if err := os.WriteFile(path, []byte(`
 roles:
   admin:
     permissions: ["*"]
-`), 0644)
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	p, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)

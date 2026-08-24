@@ -66,6 +66,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webauthn/register/complete", h.completeRegistration)
 	mux.HandleFunc("/api/webauthn/login/begin", h.beginLogin)
 	mux.HandleFunc("/api/webauthn/login/complete", h.completeLogin)
+	mux.HandleFunc("/api/webauthn/credentials", h.listCredentials)
+	mux.HandleFunc("/api/webauthn/credentials/", h.deleteCredential)
+	mux.HandleFunc("/api/webauthn/admin/register/begin", h.beginAdminRegistration)
+	mux.HandleFunc("/api/webauthn/admin/register/complete", h.completeAdminRegistration)
 }
 
 func (h *Handler) Mux() *http.ServeMux {
@@ -173,7 +177,7 @@ func (h *Handler) completeRegistration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid session data")
 		return
 	}
-	h.store.DeleteWebAuthnSession(sessionData.Challenge)
+	_ = h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
 	credential, err := h.web().FinishRegistration(user, sessionData, r)
 	if err != nil {
@@ -244,7 +248,7 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid session data")
 		return
 	}
-	h.store.DeleteWebAuthnSession(challenge)
+	_ = h.store.DeleteWebAuthnSession(challenge)
 
 	user, err := h.loadUser(string(sessionData.UserID))
 	if err != nil {
@@ -406,7 +410,7 @@ func (h *Handler) completeAdminRegistration(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid session data")
 		return
 	}
-	h.store.DeleteWebAuthnSession(sessionData.Challenge)
+	_ = h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
 	credential, err := h.web().FinishRegistration(user, sessionData, r)
 	if err != nil {
@@ -450,7 +454,9 @@ func extractBearerToken(r *http.Request) string {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("webauthn: json encode", "error", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

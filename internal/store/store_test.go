@@ -13,7 +13,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -33,7 +33,7 @@ func TestCreateUser(t *testing.T) {
 
 func TestCreateUser_Duplicate(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateUser("alice", "pw1")
+	_, _ = s.CreateUser("alice", "pw1")
 	_, err := s.CreateUser("alice", "pw2")
 	if err == nil {
 		t.Fatal("expected error for duplicate username")
@@ -54,7 +54,7 @@ func TestCreateUser_EmptyFields(t *testing.T) {
 
 func TestGetUserByUsername(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateUser("alice", "pw")
+	_, _ = s.CreateUser("alice", "pw")
 	user, err := s.GetUserByUsername("alice")
 	if err != nil {
 		t.Fatalf("GetUserByUsername: %v", err)
@@ -89,8 +89,8 @@ func TestGetUser(t *testing.T) {
 
 func TestListUsers(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateUser("alice", "pw1")
-	s.CreateUser("bob", "pw2")
+	_, _ = s.CreateUser("alice", "pw1")
+	_, _ = s.CreateUser("bob", "pw2")
 	users, err := s.ListUsers()
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
@@ -119,7 +119,7 @@ func TestDeleteUser(t *testing.T) {
 func TestSetPassword(t *testing.T) {
 	s := newTestStore(t)
 	user, _ := s.CreateUser("alice", "pw1")
-	s.SetPassword(user.ID, "pw2")
+	_ = s.SetPassword(user.ID, "pw2")
 
 	// Verify old password fails, new works.
 	_, err := s.VerifyPassword("alice", "pw1")
@@ -134,7 +134,7 @@ func TestSetPassword(t *testing.T) {
 
 func TestVerifyPassword(t *testing.T) {
 	s := newTestStore(t)
-	s.CreateUser("alice", "correct-horse-battery-staple")
+	_, _ = s.CreateUser("alice", "correct-horse-battery-staple")
 
 	_, err := s.VerifyPassword("alice", "correct-horse-battery-staple")
 	if err != nil {
@@ -178,7 +178,7 @@ func TestSessions(t *testing.T) {
 	}
 
 	// Delete.
-	s.DeleteSession(sess.Token)
+	_ = s.DeleteSession(sess.Token)
 	_, err = s.GetSession(sess.Token)
 	if err == nil {
 		t.Fatal("expected error after delete")
@@ -232,11 +232,11 @@ func TestCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	user, _ := s.CreateUser("alice", "pw")
 	// Create a session directly with an expired timestamp.
-	s.db.Exec(`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, 'full', '2020-01-01T00:00:00Z')`,
+	_, _ = s.db.Exec(`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, 'full', '2020-01-01T00:00:00Z')`,
 		"expired-token", user.ID)
 
 	if err := s.CleanupExpiredSessions(); err != nil {
@@ -251,7 +251,7 @@ func TestCleanup(t *testing.T) {
 func TestSetRoles(t *testing.T) {
 	s := newTestStore(t)
 	user, _ := s.CreateUser("alice", "pw")
-	s.SetRoles(user.ID, []string{"admin", "manager"})
+	_ = s.SetRoles(user.ID, []string{"admin", "manager"})
 	updated, _ := s.GetUser(user.ID)
 	if len(updated.Roles) != 2 {
 		t.Errorf("expected 2 roles, got %d", len(updated.Roles))
@@ -261,9 +261,9 @@ func TestSetRoles(t *testing.T) {
 func TestDeleteUserSessions(t *testing.T) {
 	s := newTestStore(t)
 	user, _ := s.CreateUser("alice", "pw")
-	s.CreateFullSession(user.ID)
-	s.CreateFullSession(user.ID)
-	s.DeleteUserSessions(user.ID)
+	_, _ = s.CreateFullSession(user.ID)
+	_, _ = s.CreateFullSession(user.ID)
+	_ = s.DeleteUserSessions(user.ID)
 	users, _ := s.ListUsers()
 	if len(users) != 1 {
 		t.Errorf("expected user to still exist, got %d users", len(users))
@@ -272,5 +272,5 @@ func TestDeleteUserSessions(t *testing.T) {
 
 func init() {
 	// Ensure SQLite temp files go to the test temp dir.
-	os.Setenv("SQLITE_TMPDIR", os.TempDir())
+	_ = os.Setenv("SQLITE_TMPDIR", os.TempDir())
 }

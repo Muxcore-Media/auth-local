@@ -17,7 +17,7 @@ func TestLoginExchangeIncludesTenantClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 
 	user, err := st.CreateUserTenant("carol", "password123", "tenant-z")
 	if err != nil {
@@ -65,7 +65,7 @@ func TestInviteAPIAcceptsTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 
 	h := New(st, "127.0.0.1:0", nil)
 	mux := http.NewServeMux()

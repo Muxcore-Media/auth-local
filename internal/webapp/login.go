@@ -183,7 +183,7 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"token":     sessToken,
 		"user_id":   user.ID,
 		"username":  user.Username,
@@ -490,7 +490,7 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"requires_2fa":  true,
 			"partial_token": partialSess.Token,
 			"user_id":       user.ID,
@@ -506,7 +506,7 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"token":     sess.Token,
 		"user_id":   user.ID,
 		"username":  user.Username,
@@ -576,7 +576,7 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"token":     fullSess.Token,
 		"user_id":   user.ID,
 		"username":  user.Username,
