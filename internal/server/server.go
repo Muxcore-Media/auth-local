@@ -409,6 +409,18 @@ func (s *AuthServer) CreateUser(ctx context.Context, req *authv1.CreateUserReque
 	if req.Username == "" || req.Password == "" {
 		return &authv1.CreateUserResponse{Error: "username and password are required"}, nil
 	}
+	count, err := s.userCount()
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if count > 0 {
+		if err := s.requireAdmin(ctx); err != nil {
+			if st, ok := status.FromError(err); ok {
+				return &authv1.CreateUserResponse{Error: st.Message()}, nil
+			}
+			return nil, err
+		}
+	}
 	user, err := s.store.CreateUser(req.Username, req.Password)
 	if err != nil {
 		return &authv1.CreateUserResponse{Error: err.Error()}, nil
@@ -417,6 +429,12 @@ func (s *AuthServer) CreateUser(ctx context.Context, req *authv1.CreateUserReque
 }
 
 func (s *AuthServer) DeleteUser(ctx context.Context, req *authv1.DeleteUserRequest) (*authv1.DeleteUserResponse, error) {
+	if err := s.requireAdmin(ctx); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DeleteUserResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DeleteUser(req.UserId); err != nil {
 		return &authv1.DeleteUserResponse{Error: err.Error()}, nil
 	}
@@ -424,6 +442,9 @@ func (s *AuthServer) DeleteUser(ctx context.Context, req *authv1.DeleteUserReque
 }
 
 func (s *AuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersRequest) (*authv1.ListUsersResponse, error) {
+	if err := s.requireAdmin(ctx); err != nil {
+		return nil, err
+	}
 	users, err := s.store.ListUsers()
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -443,6 +464,12 @@ func (s *AuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersRequest
 }
 
 func (s *AuthServer) SetPassword(ctx context.Context, req *authv1.SetPasswordRequest) (*authv1.SetPasswordResponse, error) {
+	if err := s.requireAdmin(ctx); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.SetPasswordResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.SetPassword(req.UserId, req.Password); err != nil {
 		return &authv1.SetPasswordResponse{Error: err.Error()}, nil
 	}
@@ -450,6 +477,12 @@ func (s *AuthServer) SetPassword(ctx context.Context, req *authv1.SetPasswordReq
 }
 
 func (s *AuthServer) SetRoles(ctx context.Context, req *authv1.SetRolesRequest) (*authv1.SetRolesResponse, error) {
+	if err := s.requireAdmin(ctx); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.SetRolesResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.SetRoles(req.UserId, req.Roles); err != nil {
 		return &authv1.SetRolesResponse{Error: err.Error()}, nil
 	}

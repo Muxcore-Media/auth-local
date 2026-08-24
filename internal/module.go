@@ -197,7 +197,8 @@ func (m *Module) Init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen HTTP %s: %w", m.httpAddr, err)
 	}
-	m.webHandler = webapp.New(m.store, m.httpAddr, m.trustedProxies)
+	publicURL := os.Getenv("AUTH_HTTP_URL")
+	m.webHandler = webapp.New(m.store, publicURL, m.trustedProxies)
 	slog.Info("auth-local initialized",
 		"grpc", m.grpcAddr,
 		"http", m.httpAddr,

@@ -54,7 +54,7 @@ type codeEntry struct {
 
 type Handler struct {
 	store          *authStore.Store
-	authAddr       string
+	publicURL      string
 	trustedProxies []net.IPNet
 	rateMu         sync.Mutex
 	rateRecords    map[string]*loginRateRecord
@@ -63,13 +63,13 @@ type Handler struct {
 	stopCh         chan struct{}
 }
 
-func New(store *authStore.Store, authAddr string, trustedProxies []net.IPNet) *Handler {
+func New(store *authStore.Store, publicURL string, trustedProxies []net.IPNet) *Handler {
 	if len(trustedProxies) == 0 {
 		trustedProxies = defaultTrustedProxies()
 	}
 	h := &Handler{
 		store:          store,
-		authAddr:       authAddr,
+		publicURL:      strings.TrimRight(strings.TrimSpace(publicURL), "/"),
 		trustedProxies: trustedProxies,
 		rateRecords:    make(map[string]*loginRateRecord),
 		codes:          make(map[string]*codeEntry),
@@ -86,10 +86,18 @@ func (h *Handler) Stop() {
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/login", h.loginHandler)
-	mux.HandleFunc("/login/password", h.passwordLogin)
-	mux.HandleFunc("/login/totp", h.totpLogin)
-	mux.HandleFunc("/login/exchange", h.exchangeHandler)
+	secure := func(fn http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			setSecurityHeaders(w)
+			fn(w, r)
+		}
+	}
+	mux.HandleFunc("/login", secure(h.loginHandler))
+	mux.HandleFunc("/login/password", secure(h.passwordLogin))
+	mux.HandleFunc("/login/totp", secure(h.totpLogin))
+	mux.HandleFunc("/login/exchange", secure(h.exchangeHandler))
+	mux.HandleFunc("/login/device", secure(h.deviceLogin))
+	mux.HandleFunc("/login/device/totp", secure(h.deviceTOTPLogin))
 	h.RegisterInviteRoutes(mux)
 }
 
@@ -174,7 +182,6 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"token":     sessToken,
@@ -265,23 +272,13 @@ func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, errMsg str
 	}
 
 	csrfToken := generateCSRFToken()
-	// Distinct from admin-ui's "csrf-token": cookies are not port-scoped, so a
-	// shared name lets admin GETs overwrite the auth login token mid-form.
-	http.SetCookie(w, &http.Cookie{
-		Name:     authCSRFCookie,
-		Value:    csrfToken,
-		Path:     "/login",
-		HttpOnly: false,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   600,
-	})
+	h.setCSRFCookie(w, r, csrfToken)
 
 	tmpl, err := template.ParseFS(pageHTML, "login.html")
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, LoginPageData{
 		Error:       errMsg,
@@ -295,21 +292,13 @@ func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, errMsg str
 
 func (h *Handler) renderTOTP(w http.ResponseWriter, r *http.Request, partialToken, redirect, errMsg string) {
 	csrfToken := generateCSRFToken()
-	http.SetCookie(w, &http.Cookie{
-		Name:     authCSRFCookie,
-		Value:    csrfToken,
-		Path:     "/login",
-		HttpOnly: false,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   600,
-	})
+	h.setCSRFCookie(w, r, csrfToken)
 
 	tmpl, err := template.ParseFS(pageHTML, "totp.html")
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, map[string]string{
 		"Error":        errMsg,
@@ -457,6 +446,145 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 	h.redirectWithCode(w, r, fullSess.Token, redirect)
 }
 
+// deviceLogin accepts JSON credentials for native clients (TV, mobile) without CSRF cookies.
+func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ip := h.extractIP(r)
+	if !h.checkRateLimit(ip) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+		return
+	}
+
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	username := strings.TrimSpace(creds.Username)
+	password := creds.Password
+	if username == "" || password == "" {
+		http.Error(w, "username and password required", http.StatusBadRequest)
+		return
+	}
+
+	user, err := h.store.VerifyPassword(username, password)
+	if err != nil {
+		slog.Warn("device login: password verification failed", "username", username)
+		http.Error(w, "invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
+	if err == nil && totpEnabled && secret != "" {
+		partialSess, err := h.store.CreatePartialSession(user.ID)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"requires_2fa":  true,
+			"partial_token": partialSess.Token,
+			"user_id":       user.ID,
+			"username":      user.Username,
+		})
+		return
+	}
+
+	sess, err := h.store.CreateFullSession(user.ID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":     sess.Token,
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"tenant_id": user.TenantID,
+		"claims":    user.Claims(),
+	})
+}
+
+// deviceTOTPLogin completes native device login after password step when TOTP is enabled.
+func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ip := h.extractIP(r)
+	if !h.checkRateLimit(ip) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+		return
+	}
+
+	var body struct {
+		PartialToken string `json:"partial_token"`
+		TOTPCode     string `json:"totp_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	partialToken := strings.TrimSpace(body.PartialToken)
+	totpCode := strings.TrimSpace(body.TOTPCode)
+	if partialToken == "" || totpCode == "" {
+		http.Error(w, "partial_token and totp_code required", http.StatusBadRequest)
+		return
+	}
+
+	partialSess, err := h.store.GetSession(partialToken)
+	if err != nil {
+		http.Error(w, "session expired", http.StatusUnauthorized)
+		return
+	}
+	if partialSess.Kind != "partial" {
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return
+	}
+
+	secret, enabled, err := h.store.GetTOTPSecret(partialSess.UserID)
+	if err != nil || !enabled || secret == "" {
+		http.Error(w, "TOTP is not enabled", http.StatusBadRequest)
+		return
+	}
+	if !totp.Validate(totpCode, secret) {
+		http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
+		return
+	}
+
+	fullSess, err := h.store.UpgradeSession(partialToken)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	user, err := h.store.GetUser(fullSess.UserID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token":     fullSess.Token,
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"tenant_id": user.TenantID,
+		"claims":    user.Claims(),
+	})
+}
+
 func safeRedirect(r *url.URL, redirect string) string {
 	if redirect == "" {
 		return "/"
@@ -474,11 +602,45 @@ func safeRedirect(r *url.URL, redirect string) string {
 	return "/"
 }
 
+func (h *Handler) setCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCSRFCookie,
+		Value:    token,
+		Path:     "/login",
+		HttpOnly: true,
+		Secure:   h.cookieSecure(r),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   600,
+	})
+}
+
+func (h *Handler) cookieSecure(r *http.Request) bool {
+	if strings.HasPrefix(h.publicURL, "https://") {
+		return true
+	}
+	if r.TLS != nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if isTrustedProxy(host, h.trustedProxies) &&
+		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	return false
+}
+
 func setSecurityHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; font-src 'self'; connect-src 'self'; "+
+			"frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 }
 
 func (h *Handler) extractIP(r *http.Request) string {

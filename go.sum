@@ -1,3 +1,15 @@
+github.com/Muxcore-Media/contracts-media v0.1.0 h1:kjUfy9U5nPvImjAnfGpiLjRxp739YH2eA93c+tZ7nW8=
+github.com/Muxcore-Media/contracts-media v0.1.0/go.mod h1:cYmz14RYUL0VxnVRNSCz0n1HOjjL1yzbpDWdWdkd+BI=
+github.com/Muxcore-Media/core v0.5.2 h1:vXu55aw7CtSbXBdvrV20dfufWaTwi7KCTdnBhX+oXjU=
+github.com/Muxcore-Media/core v0.5.2/go.mod h1:dPC03/h+ap/geLApar3OA3OM7S+gZtF4Qbl5Vo+oPfg=
+github.com/Muxcore-Media/core v0.5.8 h1:GJUKyWwtnzjoPr0+srXsLwTVz0YGyFOxrCNorndQaJ8=
+github.com/Muxcore-Media/core v0.5.8/go.mod h1:RVDaKMkaFPIjCza6XE+q1ex4ir5yRLSHsy4ROfwyOMg=
+github.com/Muxcore-Media/core/pkg/contracts v0.5.2 h1:PbeNCUesxJiXK1Kbhsbf7ffY95zBD6sRGj5qY0jmd3Y=
+github.com/Muxcore-Media/core/pkg/contracts v0.5.2/go.mod h1:gbI+28IlviQlGYYoQj2DJVet/5LXLQtjFeSRo0a+8BI=
+github.com/Muxcore-Media/core/pkg/contracts v0.5.8 h1:u96Dwv7ENSFemoeuApau1d6vt8Mkk9UlwKd6vosOfQg=
+github.com/Muxcore-Media/core/pkg/contracts v0.5.8/go.mod h1:3axnX6N6kvuCcvN2rJGj/DsiUbsUo7amcozNG8IChLA=
+github.com/Muxcore-Media/core/sdk/go/module v0.5.2 h1:QsYEA0Hzz2JJO606J/Tns+Aa2mmucEPEADghgQqP0aw=
+github.com/Muxcore-Media/core/sdk/go/module v0.5.2/go.mod h1:R7aeTKJwVkHTcR4RSkN7pYv0ve+5EjqoOnT/BbIKBtQ=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc h1:biVzkmvwrH8WK8raXaxBx6fRVTlJILwEwQGL1I/ByEI=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc/go.mod h1:paBWMcWSl3LHKBqUq+rly7CNSldXjb2rDl3JlRe0mD8=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
