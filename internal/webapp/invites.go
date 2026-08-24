@@ -117,9 +117,9 @@ func (h *Handler) apiInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Token     string `json:"token"`
-		Username  string `json:"username"`
-		Password  string `json:"password"`
+		Token    string `json:"token"`
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)

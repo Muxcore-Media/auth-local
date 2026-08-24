@@ -282,7 +282,7 @@ func (s *AuthServer) Validate(ctx context.Context, req *authv1.ValidateRequest) 
 }
 
 func (s *AuthServer) Revoke(ctx context.Context, req *authv1.RevokeRequest) (*authv1.RevokeResponse, error) {
-	s.store.DeleteSession(req.Token)
+	_ = s.store.DeleteSession(req.Token)
 	return &authv1.RevokeResponse{}, nil
 }
 
@@ -600,7 +600,7 @@ func (s *AuthServer) CompleteAdminRegistration(ctx context.Context, req *authv1.
 	if err := json.Unmarshal(sd, &sessionData); err != nil {
 		return &authv1.CompleteAdminRegistrationResponse{Error: "invalid session data"}, nil
 	}
-	s.store.DeleteWebAuthnSession(sessionData.Challenge)
+	_ = s.store.DeleteWebAuthnSession(sessionData.Challenge)
 
 	user, err := s.loadWebAuthnUser(req.UserId)
 	if err != nil {
