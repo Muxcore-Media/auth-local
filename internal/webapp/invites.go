@@ -76,10 +76,72 @@ type invitePageData struct {
 
 func (h *Handler) RegisterInviteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/invite/redeem", h.inviteRedeem)
+	mux.HandleFunc("/api/invite/peek", h.apiInvitePeek)
+	mux.HandleFunc("/api/invite/redeem", h.apiInviteRedeem)
 	mux.HandleFunc("/api/invites", h.apiInvites)
 	mux.HandleFunc("/api/invites/", h.apiInviteAction)
 	mux.HandleFunc("/invite", h.invitePage)
 	mux.HandleFunc("/invite/", h.invitePage) // /invite/{token}
+}
+
+func (h *Handler) apiInvitePeek(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	if token == "" {
+		http.Error(w, `{"error":"token required"}`, http.StatusBadRequest)
+		return
+	}
+	inv, err := h.store.PeekInvite(token)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"valid": false, "error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"valid":      true,
+		"role":       inv.Role,
+		"expires_at": inv.ExpiresAt.UTC().Format(time.RFC3339),
+		"max_uses":   inv.MaxUses,
+		"use_count":  inv.UseCount,
+	})
+}
+
+func (h *Handler) apiInviteRedeem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Token     string `json:"token"`
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	token := strings.TrimSpace(body.Token)
+	username := strings.TrimSpace(body.Username)
+	password := body.Password
+	user, _, err := h.store.RedeemInvite(token, username, password)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	slog.Info("invite redeemed", "user", user.Username, "user_id", user.ID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":       true,
+		"username": user.Username,
+		"user_id":  user.ID,
+	})
 }
 
 func (h *Handler) invitePage(w http.ResponseWriter, r *http.Request) {
