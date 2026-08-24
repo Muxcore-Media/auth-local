@@ -16,7 +16,7 @@ func newTestHandler(t *testing.T) (*Handler, *authStore.Store) {
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 
 	h, err := New("localhost", []string{"http://localhost:8080"}, "MuxCore Test", st)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestHealthEndpoint(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 	var resp map[string]string
-	json.NewDecoder(w.Body).Decode(&resp)
+	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["status"] != "ok" {
 		t.Errorf("expected ok, got %s", resp["status"])
 	}
@@ -75,7 +75,7 @@ func TestBeginRegistrationRequiresAuth(t *testing.T) {
 
 func TestBeginRegistrationReturnsOptions(t *testing.T) {
 	h, st := newTestHandler(t)
-	st.CreateUser("alice", "password123")
+	_, _ = st.CreateUser("alice", "password123")
 	user, _ := st.GetUserByUsername("alice")
 	sess, _ := st.CreateFullSession(user.ID)
 
@@ -131,7 +131,7 @@ func TestBeginLoginNonexistentUser(t *testing.T) {
 
 func TestBeginLoginReturnsOptions(t *testing.T) {
 	h, st := newTestHandler(t)
-	st.CreateUser("alice", "pw")
+	_, _ = st.CreateUser("alice", "pw")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/webauthn/login/begin?username=alice", nil)
 	w := httptest.NewRecorder()
@@ -145,7 +145,7 @@ func TestBeginLoginReturnsOptions(t *testing.T) {
 
 func TestCompleteRegistrationWithoutBody(t *testing.T) {
 	h, st := newTestHandler(t)
-	st.CreateUser("alice", "pw")
+	_, _ = st.CreateUser("alice", "pw")
 	user, _ := st.GetUserByUsername("alice")
 	sess, _ := st.CreateFullSession(user.ID)
 

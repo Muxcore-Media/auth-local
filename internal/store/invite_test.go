@@ -86,7 +86,7 @@ func TestInviteRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	inv, err := s.CreateInvite("admin", "viewer", "", 1, time.Hour)
 	if err != nil {
 		t.Fatal(err)
