@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +99,71 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/login/exchange", secure(h.exchangeHandler))
 	mux.HandleFunc("/login/device", secure(h.deviceLogin))
 	mux.HandleFunc("/login/device/totp", secure(h.deviceTOTPLogin))
+	mux.HandleFunc("/", secure(h.rootHandler))
 	h.RegisterInviteRoutes(mux)
+}
+
+func (h *Handler) rootHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.TrimSpace(r.URL.Query().Get("code")) != "" {
+		h.renderRootMisredirect(w, r)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+const rootMisredirectHTML = `<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>MuxCore Auth</title>
+<style>
+*,:after,:before{box-sizing:border-box;border:0 solid #23252b}
+html{font-family:"Inter","IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:14px;color-scheme:dark}
+body{margin:0;min-height:100vh;color:#f5f5f7;display:flex;align-items:center;justify-content:center;padding:1rem;
+background:
+  radial-gradient(1200px 600px at 8% -10%, rgba(61,184,168,.12) 0%, transparent 55%),
+  radial-gradient(900px 500px at 100% 0%, rgba(245,166,35,.08) 0%, transparent 50%),
+  #0b0c0f;
+}
+.card{max-width:28rem;width:100%;padding:2rem;text-align:center}
+.text-2xl{font-size:1.5rem;font-weight:700}
+.text-sm{font-size:.875rem}
+.text-gray-400{color:#a1a1aa}
+.text-gray-500{color:#6b6b73}
+.mb-4{margin-bottom:1rem}.mb-8{margin-bottom:2rem}.mt-4{margin-top:1rem}
+a{color:#3db8a8}
+code{color:#c7c8cc}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="text-2xl mb-4">Return to the app</div>
+<p class="text-sm text-gray-400 mb-4">Sign-in succeeded, but this auth host cannot send you back to the mobile app.</p>
+<p class="text-sm text-gray-400 mb-8">In MuxCore iOS, set the server URL to <code>{{.MediaURL}}</code> (not this auth page), then sign in again.</p>
+<p class="text-sm text-gray-500 mt-4"><a href="/login">Back to login</a></p>
+</div>
+</body>
+</html>`
+
+func (h *Handler) renderRootMisredirect(w http.ResponseWriter, r *http.Request) {
+	mediaURL := strings.TrimSpace(os.Getenv("MEDIA_UI_PUBLIC_URL"))
+	if mediaURL == "" {
+		mediaURL = "https://mux.zem.systems"
+	}
+	tmpl, err := template.New("root").Parse(rootMisredirectHTML)
+	if err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, map[string]string{"MediaURL": mediaURL}); err != nil {
+		slog.Error("root misredirect template execute", "error", err)
+	}
 }
 
 // --- One-time code exchange (replaces token in URL) ---
