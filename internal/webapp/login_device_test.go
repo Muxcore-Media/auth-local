@@ -2,6 +2,7 @@ package webapp_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pquerna/otp/totp"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/server"
@@ -33,9 +35,22 @@ func TestDeviceLoginTOTPFlow(t *testing.T) {
 	}
 
 	srv := server.New(store, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
-	enable, err := srv.EnableTOTP(t.Context(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	sess, err := store.CreateFullSession(user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-auth-token", sess.Token))
+	enable, err := srv.EnableTOTP(ctx, &authv1.EnableTOTPRequest{UserId: user.ID})
 	if err != nil || enable.GetError() != "" {
 		t.Fatalf("EnableTOTP: %v %+v", err, enable)
+	}
+	code, err := totp.GenerateCode(enable.Secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	verify, err := srv.VerifyTOTPSetup(ctx, &authv1.VerifyTOTPSetupRequest{UserId: user.ID, TotpCode: code})
+	if err != nil || !verify.Verified {
+		t.Fatalf("VerifyTOTPSetup: %v %+v", err, verify)
 	}
 
 	h := webapp.New(store, "http://127.0.0.1:9401", nil)
@@ -65,9 +80,9 @@ func TestDeviceLoginTOTPFlow(t *testing.T) {
 
 	secret, enabled, err := store.GetTOTPSecret(user.ID)
 	if err != nil || !enabled {
-		t.Fatal(err)
+		t.Fatalf("totp not login-ready: err=%v enabled=%v secret=%q", err, enabled, secret)
 	}
-	code, err := totp.GenerateCode(secret, time.Now())
+	code, err = totp.GenerateCode(secret, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

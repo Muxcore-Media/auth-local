@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pquerna/otp/totp"
+	"google.golang.org/grpc/metadata"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
@@ -23,6 +24,15 @@ func newTestServer(t *testing.T) *AuthServer {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return New(s, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
+}
+
+func ctxWithSession(t *testing.T, srv *AuthServer, userID string) context.Context {
+	t.Helper()
+	sess, err := srv.store.CreateFullSession(userID)
+	if err != nil {
+		t.Fatalf("CreateFullSession: %v", err)
+	}
+	return metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-auth-token", sess.Token))
 }
 
 func TestAuthenticate_Password(t *testing.T) {
@@ -179,8 +189,9 @@ func TestExtractIdentity_NoToken(t *testing.T) {
 func TestEnableTOTP(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
+	ctx := ctxWithSession(t, srv, user.ID)
 
-	resp, err := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	resp, err := srv.EnableTOTP(ctx, &authv1.EnableTOTPRequest{UserId: user.ID})
 	if err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}
@@ -191,19 +202,32 @@ func TestEnableTOTP(t *testing.T) {
 		t.Fatal("expected non-empty QR code URL")
 	}
 
-	// Verify TOTP is now enabled.
+	// TOTP is pending until VerifyTOTPSetup — not required at login yet.
 	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
-	if !status.Enabled {
-		t.Fatal("expected TOTP to be enabled")
+	if status.Enabled {
+		t.Fatal("expected TOTP pending until verified")
 	}
 }
 
 func TestTOTP_LoginFlow(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
+	ctx := ctxWithSession(t, srv, user.ID)
 
-	enableResp, _ := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	enableResp, _ := srv.EnableTOTP(ctx, &authv1.EnableTOTPRequest{UserId: user.ID})
 	secret := enableResp.Secret
+
+	realCode, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	verifyResp, err := srv.VerifyTOTPSetup(ctx, &authv1.VerifyTOTPSetupRequest{
+		UserId:   user.ID,
+		TotpCode: realCode,
+	})
+	if err != nil || !verifyResp.Verified {
+		t.Fatalf("VerifyTOTPSetup: err=%v resp=%+v", err, verifyResp)
+	}
 
 	// Login with password — should get partial token (TOTP requires 2FA).
 	creds, _ := json.Marshal(map[string]string{"username": "alice", "password": "pw"})
@@ -225,7 +249,7 @@ func TestTOTP_LoginFlow(t *testing.T) {
 	}
 
 	// Complete with a valid TOTP code.
-	realCode, err := totp.GenerateCode(secret, time.Now())
+	realCode, err = totp.GenerateCode(secret, time.Now())
 	if err != nil {
 		t.Fatalf("GenerateCode: %v", err)
 	}
@@ -255,8 +279,10 @@ func TestTOTP_LoginFlow(t *testing.T) {
 func TestTOTP_InvalidCode(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
-	enableResp, _ := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
-	_ = enableResp
+	ctx := ctxWithSession(t, srv, user.ID)
+	enableResp, _ := srv.EnableTOTP(ctx, &authv1.EnableTOTPRequest{UserId: user.ID})
+	code, _ := totp.GenerateCode(enableResp.Secret, time.Now())
+	_, _ = srv.VerifyTOTPSetup(ctx, &authv1.VerifyTOTPSetupRequest{UserId: user.ID, TotpCode: code})
 
 	// Login to get partial token.
 	creds, _ := json.Marshal(map[string]string{"username": "alice", "password": "pw"})
@@ -285,17 +311,41 @@ func TestTOTP_InvalidCode(t *testing.T) {
 func TestDisableTOTP(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
-	_, _ = srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	ctx := ctxWithSession(t, srv, user.ID)
+	enableResp, _ := srv.EnableTOTP(ctx, &authv1.EnableTOTPRequest{UserId: user.ID})
+	code, _ := totp.GenerateCode(enableResp.Secret, time.Now())
+	_, _ = srv.VerifyTOTPSetup(ctx, &authv1.VerifyTOTPSetupRequest{UserId: user.ID, TotpCode: code})
 
 	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if !status.Enabled {
 		t.Fatal("expected TOTP enabled before disable")
 	}
 
-	_, _ = srv.DisableTOTP(context.Background(), &authv1.DisableTOTPRequest{UserId: user.ID})
+	_, _ = srv.DisableTOTP(ctx, &authv1.DisableTOTPRequest{UserId: user.ID})
 
 	status, _ = srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if status.Enabled {
 		t.Fatal("expected TOTP disabled after disable")
+	}
+}
+
+func TestCreateUser_FirstUserIsAdmin(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.CreateUser(context.Background(), &authv1.CreateUserRequest{
+		Username: "bootstrap",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("CreateUser error: %s", resp.Error)
+	}
+	user, err := srv.store.GetUser(resp.UserId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(user.Roles) != 1 || user.Roles[0] != "admin" {
+		t.Fatalf("first user roles = %v, want [admin]", user.Roles)
 	}
 }

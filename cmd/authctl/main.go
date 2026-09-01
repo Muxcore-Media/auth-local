@@ -10,6 +10,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 )
@@ -51,7 +52,7 @@ func main() {
 	defer func() { _ = conn.Close() }()
 
 	client := authv1.NewAuthServiceClient(conn)
-	ctx := context.Background()
+	ctx := authContext(context.Background(), *adminToken)
 
 	switch flag.Arg(0) {
 	case "adduser":
@@ -61,7 +62,7 @@ func main() {
 	case "rm":
 		cmdDeleteUser(ctx, client, flag.Args()[1:])
 	case "list":
-		cmdListUsers(ctx, client, *adminToken)
+		cmdListUsers(ctx, client)
 	case "addrole":
 		cmdAddRole(ctx, client, flag.Args()[1:])
 	case "rmrole":
@@ -74,6 +75,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", flag.Arg(0))
 		os.Exit(1)
 	}
+}
+
+func authContext(ctx context.Context, token string) context.Context {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ctx
+	}
+	return metadata.NewOutgoingContext(ctx, metadata.Pairs("x-auth-token", token))
 }
 
 func readPassword(prompt string) string {
@@ -175,7 +184,7 @@ func cmdDeleteUser(ctx context.Context, client authv1.AuthServiceClient, args []
 	fmt.Printf("user %q deleted\n", args[0])
 }
 
-func cmdListUsers(ctx context.Context, client authv1.AuthServiceClient, adminToken string) {
+func cmdListUsers(ctx context.Context, client authv1.AuthServiceClient) {
 	resp, err := client.ListUsers(ctx, &authv1.ListUsersRequest{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "list users: %v\n", err)

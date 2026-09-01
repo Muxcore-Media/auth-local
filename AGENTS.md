@@ -7,8 +7,8 @@ MuxCore sidecar module (`auth-local`). Workspace deploy and SSH: [`../AGENTS.md`
 | Field | Value |
 |-------|-------|
 | Directory | `auth-local` |
-| Capabilities | see muxcore.json |
-| Contracts | none declared |
+| Capabilities | `auth`, `authorizer`, `identity`, `settings` (see `muxcore.json`) |
+| Contracts | `github.com/Muxcore-Media/core/pkg/contracts` — AuthProvider, Authorizer, IdentityProvider, SettingsProvider |
 
 ## Agent rules
 
@@ -22,5 +22,5 @@ MuxCore sidecar module (`auth-local`). Workspace deploy and SSH: [`../AGENTS.md`
 
 ```bash
 cd auth-local
-go test ./...
+nix-shell -p go --run 'go test ./...'
 ```

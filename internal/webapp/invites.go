@@ -11,6 +11,23 @@ import (
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
+var allowedInviteRoles = map[string]bool{
+	"user":    true,
+	"viewer":  true,
+	"manager": true,
+}
+
+func normalizeInviteRole(role string) (string, bool) {
+	role = strings.TrimSpace(strings.ToLower(role))
+	if role == "" {
+		role = "user"
+	}
+	if !allowedInviteRoles[role] {
+		return "", false
+	}
+	return role, true
+}
+
 const inviteHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -53,6 +70,7 @@ a{color:#3db8a8}
 <p>Create your account with invite role <strong>{{.Role}}</strong>.</p>
 <form method="post" action="/invite/redeem">
 <input type="hidden" name="token" value="{{.Token}}"/>
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}"/>
 <label>Username</label>
 <input name="username" required autocomplete="username"/>
 <label>Password</label>
@@ -67,11 +85,12 @@ a{color:#3db8a8}
 var inviteTmpl = template.Must(template.New("invite").Parse(inviteHTML))
 
 type invitePageData struct {
-	Token   string
-	Role    string
-	Error   string
-	Success bool
-	Invalid bool
+	Token     string
+	Role      string
+	Error     string
+	Success   bool
+	Invalid   bool
+	CSRFToken string
 }
 
 func (h *Handler) RegisterInviteRoutes(mux *http.ServeMux) {
@@ -174,6 +193,9 @@ func (h *Handler) invitePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data.Role = inv.Role
+	csrfToken := generateCSRFToken()
+	h.setCSRFCookie(w, r, csrfToken)
+	data.CSRFToken = csrfToken
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = inviteTmpl.Execute(w, data)
 }
@@ -184,6 +206,12 @@ func (h *Handler) inviteRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
+	cookieCSRF, _ := r.Cookie(authCSRFCookie)
+	formCSRF := r.FormValue("csrf_token")
+	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
+		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		return
+	}
 	token := strings.TrimSpace(r.FormValue("token"))
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
@@ -206,10 +234,17 @@ func (h *Handler) inviteRedeem(w http.ResponseWriter, r *http.Request) {
 	_ = inviteTmpl.Execute(w, data)
 }
 
+func (h *Handler) requireAdminHTTP(w http.ResponseWriter, r *http.Request) *authStore.Session {
+	return mustAdminSession(w, r, h.store)
+}
+
 func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case http.MethodGet:
+		if h.requireAdminHTTP(w, r) == nil {
+			return
+		}
 		list, err := h.store.ListInvites()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -220,6 +255,10 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"invites": list})
 	case http.MethodPost:
+		adminSess := h.requireAdminHTTP(w, r)
+		if adminSess == nil {
+			return
+		}
 		var body struct {
 			CreatedBy string `json:"createdBy"`
 			Role      string `json:"role"`
@@ -246,7 +285,18 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 		if tenantID == "" {
 			tenantID = strings.TrimSpace(body.Tenant)
 		}
-		inv, err := h.store.CreateInvite(body.CreatedBy, body.Role, tenantID, maxUses, time.Duration(body.TTLHours)*time.Hour)
+		role, ok := normalizeInviteRole(body.Role)
+		if !ok {
+			http.Error(w, "invalid invite role (allowed: user, viewer, manager)", http.StatusBadRequest)
+			return
+		}
+		createdBy := strings.TrimSpace(body.CreatedBy)
+		if createdBy == "" {
+			if u, err := h.store.GetUser(adminSess.UserID); err == nil {
+				createdBy = u.Username
+			}
+		}
+		inv, err := h.store.CreateInvite(createdBy, role, tenantID, maxUses, time.Duration(body.TTLHours)*time.Hour)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -267,6 +317,9 @@ func (h *Handler) apiInviteAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(path, "/")
 	id := parts[0]
 	if r.Method == http.MethodDelete || (r.Method == http.MethodPost && len(parts) > 1 && parts[1] == "revoke") {
+		if h.requireAdminHTTP(w, r) == nil {
+			return
+		}
 		if err := h.store.RevokeInvite(id); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

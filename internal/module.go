@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -37,6 +38,8 @@ type Module struct {
 	sighupCh       chan os.Signal
 	sighupStop     chan struct{}
 	sighupDone     chan struct{}
+	cleanupStop    chan struct{}
+	cleanupDone    chan struct{}
 	cfgMu          sync.RWMutex
 	id             string
 	grpcAddr       string
@@ -161,7 +164,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 		Description:  "Local authentication and authorization provider",
 		Author:       "MuxCore",
 		Capabilities: []string{contracts.CapabilityAuth, contracts.CapabilityAuthorizer, contracts.CapabilityIdentity, "settings"},
-		HTTPAddr:     m.grpcAddr,
+		HTTPAddr:     m.httpAddr,
 	}
 }
 
@@ -302,6 +305,26 @@ func (m *Module) Start(ctx context.Context) error {
 			}
 		}
 	}()
+
+	cleanupStop := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	m.cleanupStop = cleanupStop
+	m.cleanupDone = cleanupDone
+	go func() {
+		defer close(cleanupDone)
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupStop:
+				return
+			case <-ticker.C:
+				if err := m.store.CleanupExpiredSessions(); err != nil {
+					slog.Warn("session cleanup failed", "error", err)
+				}
+			}
+		}
+	}()
 	return nil
 }
 
@@ -318,6 +341,12 @@ func (m *Module) Stop(ctx context.Context) error {
 	}
 	if m.sighupCh != nil {
 		signal.Stop(m.sighupCh)
+	}
+	if m.cleanupStop != nil {
+		close(m.cleanupStop)
+		if m.cleanupDone != nil {
+			<-m.cleanupDone
+		}
 	}
 	if m.webHandler != nil {
 		m.webHandler.Stop()

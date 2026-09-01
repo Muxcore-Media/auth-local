@@ -296,6 +296,44 @@ func mustAuth(w http.ResponseWriter, r *http.Request, store *authStore.Store) *a
 	return sess
 }
 
+func mustAdminAuth(w http.ResponseWriter, r *http.Request, store *authStore.Store) *authStore.Session {
+	sess := mustAuth(w, r, store)
+	if sess == nil {
+		return nil
+	}
+	user, err := store.GetUser(sess.UserID)
+	if err != nil || !hasRole(user.Roles, "admin") {
+		writeError(w, http.StatusForbidden, "admin role required")
+		return nil
+	}
+	return sess
+}
+
+func (h *Handler) authSelfOrAdmin(w http.ResponseWriter, r *http.Request, targetUserID string) bool {
+	sess := mustAuth(w, r, h.store)
+	if sess == nil {
+		return false
+	}
+	if sess.UserID == targetUserID {
+		return true
+	}
+	user, err := h.store.GetUser(sess.UserID)
+	if err != nil || !hasRole(user.Roles, "admin") {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return false
+	}
+	return true
+}
+
+func hasRole(roles []string, want string) bool {
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) listCredentials(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "GET required")
@@ -304,6 +342,9 @@ func (h *Handler) listCredentials(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
 		writeError(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+	if !h.authSelfOrAdmin(w, r, userID) {
 		return
 	}
 
@@ -339,6 +380,9 @@ func (h *Handler) deleteCredential(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user_id required")
 		return
 	}
+	if !h.authSelfOrAdmin(w, r, userID) {
+		return
+	}
 
 	if err := h.store.DeleteWebAuthnCredential(userID, credID); err != nil {
 		writeError(w, http.StatusInternalServerError, "delete failed")
@@ -350,6 +394,9 @@ func (h *Handler) deleteCredential(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) beginAdminRegistration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	if mustAdminAuth(w, r, h.store) == nil {
 		return
 	}
 	userID := r.URL.Query().Get("user_id")
@@ -384,6 +431,9 @@ func (h *Handler) beginAdminRegistration(w http.ResponseWriter, r *http.Request)
 func (h *Handler) completeAdminRegistration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	if mustAdminAuth(w, r, h.store) == nil {
 		return
 	}
 	userID := r.URL.Query().Get("user_id")

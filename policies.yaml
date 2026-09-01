@@ -24,3 +24,5 @@ roles:
     permissions:
       - "media.view"
       - "media.search"
+  module:
+    permissions: ["*"]

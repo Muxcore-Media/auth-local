@@ -71,9 +71,11 @@ func TestInviteAPIAcceptsTenant(t *testing.T) {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
+	token := adminSession(t, st)
 	body := `{"createdBy":"admin","role":"user","tenantId":"hh-1","maxUses":1,"ttlHours":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/invites", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

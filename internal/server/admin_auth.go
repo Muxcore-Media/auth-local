@@ -64,6 +64,20 @@ func (s *AuthServer) requireAdmin(ctx context.Context) error {
 	return nil
 }
 
+func (s *AuthServer) requireSelfOrAdmin(ctx context.Context, targetUserID string) error {
+	user, err := s.callerFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	if user.ID == targetUserID {
+		return nil
+	}
+	if !hasRole(user.Roles, "admin") {
+		return status.Error(codes.PermissionDenied, "admin role required")
+	}
+	return nil
+}
+
 func (s *AuthServer) userCount() (int, error) {
 	users, err := s.store.ListUsers()
 	if err != nil {

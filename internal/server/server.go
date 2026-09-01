@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/pquerna/otp/totp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
@@ -25,6 +27,12 @@ import (
 )
 
 const issuerName = "MuxCore"
+
+type loginRateRecord struct {
+	count        int
+	blockedUntil time.Time
+	lastSeen     time.Time
+}
 
 // AuthServer implements the AuthService gRPC server.
 type AuthServer struct {
@@ -36,6 +44,8 @@ type AuthServer struct {
 	rpID         string
 	rpOrigins    []string
 	rpName       string
+	rateMu       sync.Mutex
+	rateRecords  map[string]*loginRateRecord
 }
 
 // Metrics returns Prometheus-format metrics.
@@ -56,7 +66,14 @@ func (s *AuthServer) Metrics() string {
 }
 
 func New(s *authStore.Store, p *policy.Policy, rpID string, rpOrigins []string, rpName string) *AuthServer {
-	return &AuthServer{store: s, policy: p, rpID: rpID, rpOrigins: rpOrigins, rpName: rpName}
+	return &AuthServer{
+		store:       s,
+		policy:      p,
+		rpID:        rpID,
+		rpOrigins:   rpOrigins,
+		rpName:      rpName,
+		rateRecords: make(map[string]*loginRateRecord),
+	}
 }
 
 func (s *AuthServer) RegisterWithGRPC(srv *grpc.Server) {
@@ -86,9 +103,9 @@ func (s *AuthServer) SetRelyingParty(rpID string, rpOrigins []string, rpName str
 func (s *AuthServer) Authenticate(ctx context.Context, req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
 	switch req.CredentialType {
 	case "password":
-		return s.authPassword(req)
+		return s.authPassword(ctx, req)
 	case "totp":
-		return s.authTOTP(req)
+		return s.authTOTP(ctx, req)
 	case "api-key":
 		return s.authAPIKey(req)
 	default:
@@ -99,13 +116,21 @@ func (s *AuthServer) Authenticate(ctx context.Context, req *authv1.AuthenticateR
 	}
 }
 
-func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
+func (s *AuthServer) authPassword(ctx context.Context, req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
 	var creds struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.Unmarshal(req.CredentialData, &creds); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid credential data")
+	}
+
+	if !s.checkRateLimit(rateLimitKey(ctx, creds.Username)) {
+		s.loginFailed.Add(1)
+		return &authv1.AuthenticateResponse{
+			Authenticated: false,
+			Error:         "too many login attempts; try again in one minute",
+		}, nil
 	}
 
 	user, err := s.store.VerifyPassword(creds.Username, creds.Password)
@@ -150,7 +175,7 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 	}, nil
 }
 
-func (s *AuthServer) authTOTP(req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
+func (s *AuthServer) authTOTP(ctx context.Context, req *authv1.AuthenticateRequest) (*authv1.AuthenticateResponse, error) {
 	var creds struct {
 		PartialToken string `json:"partial_token"`
 		TOTPCode     string `json:"totp_code"`
@@ -162,6 +187,14 @@ func (s *AuthServer) authTOTP(req *authv1.AuthenticateRequest) (*authv1.Authenti
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
 			Error:         "partial_token and totp_code are required",
+		}, nil
+	}
+
+	if !s.checkRateLimit("totp:" + creds.PartialToken) {
+		s.loginFailed.Add(1)
+		return &authv1.AuthenticateResponse{
+			Authenticated: false,
+			Error:         "too many login attempts; try again in one minute",
 		}, nil
 	}
 
@@ -343,6 +376,12 @@ func (s *AuthServer) ExtractIdentity(ctx context.Context, req *authv1.ExtractIde
 // --- TOTP Management ---
 
 func (s *AuthServer) EnableTOTP(ctx context.Context, req *authv1.EnableTOTPRequest) (*authv1.EnableTOTPResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.EnableTOTPResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	user, err := s.store.GetUser(req.UserId)
 	if err != nil {
 		return &authv1.EnableTOTPResponse{Error: "user not found"}, nil
@@ -372,6 +411,12 @@ func (s *AuthServer) EnableTOTP(ctx context.Context, req *authv1.EnableTOTPReque
 }
 
 func (s *AuthServer) DisableTOTP(ctx context.Context, req *authv1.DisableTOTPRequest) (*authv1.DisableTOTPResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DisableTOTPResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DisableTOTP(req.UserId); err != nil {
 		return &authv1.DisableTOTPResponse{Error: err.Error()}, nil
 	}
@@ -387,9 +432,18 @@ func (s *AuthServer) TOTPStatus(ctx context.Context, req *authv1.TOTPStatusReque
 }
 
 func (s *AuthServer) VerifyTOTPSetup(ctx context.Context, req *authv1.VerifyTOTPSetupRequest) (*authv1.VerifyTOTPSetupResponse, error) {
-	secret, enabled, err := s.store.GetTOTPSecret(req.UserId)
-	if err != nil || !enabled {
-		return &authv1.VerifyTOTPSetupResponse{Verified: false, Error: "TOTP not enabled for this user"}, nil
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.VerifyTOTPSetupResponse{Verified: false, Error: st.Message()}, nil
+		}
+		return nil, err
+	}
+	secret, loginRequired, err := s.store.GetTOTPSecret(req.UserId)
+	if err != nil || secret == "" {
+		return &authv1.VerifyTOTPSetupResponse{Verified: false, Error: "TOTP not configured for this user"}, nil
+	}
+	if loginRequired {
+		return &authv1.VerifyTOTPSetupResponse{Verified: false, Error: "TOTP already verified for this user"}, nil
 	}
 
 	if !totp.Validate(req.TotpCode, secret) {
@@ -424,6 +478,12 @@ func (s *AuthServer) CreateUser(ctx context.Context, req *authv1.CreateUserReque
 	user, err := s.store.CreateUser(req.Username, req.Password)
 	if err != nil {
 		return &authv1.CreateUserResponse{Error: err.Error()}, nil
+	}
+	if count == 0 {
+		if err := s.store.SetRoles(user.ID, []string{"admin"}); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		user.Roles = []string{"admin"}
 	}
 	return &authv1.CreateUserResponse{UserId: user.ID}, nil
 }
@@ -495,6 +555,12 @@ func (s *AuthServer) CreateAPIToken(ctx context.Context, req *authv1.CreateAPITo
 	if req.UserId == "" || req.Name == "" {
 		return &authv1.CreateAPITokenResponse{Error: "user_id and name are required"}, nil
 	}
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.CreateAPITokenResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	token, info, err := s.store.CreateAPIToken(req.UserId, req.Name, req.Scopes)
 	if err != nil {
 		return &authv1.CreateAPITokenResponse{Error: err.Error()}, nil
@@ -506,6 +572,9 @@ func (s *AuthServer) CreateAPIToken(ctx context.Context, req *authv1.CreateAPITo
 }
 
 func (s *AuthServer) ListAPITokens(ctx context.Context, req *authv1.ListAPITokensRequest) (*authv1.ListAPITokensResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		return nil, err
+	}
 	tokens, err := s.store.ListAPITokens(req.UserId)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -524,6 +593,16 @@ func (s *AuthServer) ListAPITokens(ctx context.Context, req *authv1.ListAPIToken
 }
 
 func (s *AuthServer) DeleteAPIToken(ctx context.Context, req *authv1.DeleteAPITokenRequest) (*authv1.DeleteAPITokenResponse, error) {
+	ownerID, err := s.store.APITokenUserID(req.TokenId)
+	if err != nil {
+		return &authv1.DeleteAPITokenResponse{Error: err.Error()}, nil
+	}
+	if err := s.requireSelfOrAdmin(ctx, ownerID); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DeleteAPITokenResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DeleteAPIToken(req.TokenId); err != nil {
 		return &authv1.DeleteAPITokenResponse{Error: err.Error()}, nil
 	}
@@ -533,6 +612,12 @@ func (s *AuthServer) DeleteAPIToken(ctx context.Context, req *authv1.DeleteAPITo
 // --- WebAuthn Credential Management ---
 
 func (s *AuthServer) ListWebAuthnCredentials(ctx context.Context, req *authv1.ListWebAuthnCredentialsRequest) (*authv1.ListWebAuthnCredentialsResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.ListWebAuthnCredentialsResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	infos, err := s.store.ListWebAuthnCredentialMeta(req.UserId)
 	if err != nil {
 		return &authv1.ListWebAuthnCredentialsResponse{Error: "list failed"}, nil
@@ -552,6 +637,12 @@ func (s *AuthServer) ListWebAuthnCredentials(ctx context.Context, req *authv1.Li
 }
 
 func (s *AuthServer) DeleteWebAuthnCredential(ctx context.Context, req *authv1.DeleteWebAuthnCredentialRequest) (*authv1.DeleteWebAuthnCredentialResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DeleteWebAuthnCredentialResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DeleteWebAuthnCredential(req.UserId, req.CredentialId); err != nil {
 		return &authv1.DeleteWebAuthnCredentialResponse{Error: "delete failed"}, nil
 	}
@@ -559,6 +650,12 @@ func (s *AuthServer) DeleteWebAuthnCredential(ctx context.Context, req *authv1.D
 }
 
 func (s *AuthServer) BeginAdminRegistration(ctx context.Context, req *authv1.BeginAdminRegistrationRequest) (*authv1.BeginAdminRegistrationResponse, error) {
+	if err := s.requireAdmin(ctx); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.BeginAdminRegistrationResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	// Load user with WebAuthn credentials
 	user, err := s.loadWebAuthnUser(req.UserId)
 	if err != nil {
@@ -592,6 +689,12 @@ func (s *AuthServer) BeginAdminRegistration(ctx context.Context, req *authv1.Beg
 }
 
 func (s *AuthServer) CompleteAdminRegistration(ctx context.Context, req *authv1.CompleteAdminRegistrationRequest) (*authv1.CompleteAdminRegistrationResponse, error) {
+	if err := s.requireAdmin(ctx); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.CompleteAdminRegistrationResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	sd, err := s.store.GetWebAuthnSession(req.Challenge)
 	if err != nil {
 		return &authv1.CompleteAdminRegistrationResponse{Error: "challenge not found or expired"}, nil
@@ -677,4 +780,34 @@ func (s *AuthServer) AuthorizeForTest(roles []string, action, resource string) (
 		return false, "no policy loaded"
 	}
 	return s.policy.IsAllowed(roles, action, resource)
+}
+
+func rateLimitKey(ctx context.Context, username string) string {
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		return p.Addr.String()
+	}
+	if username != "" {
+		return "user:" + username
+	}
+	return "unknown"
+}
+
+func (s *AuthServer) checkRateLimit(key string) bool {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	rec, exists := s.rateRecords[key]
+	if !exists {
+		rec = &loginRateRecord{}
+		s.rateRecords[key] = rec
+	}
+	rec.lastSeen = time.Now()
+	if time.Now().Before(rec.blockedUntil) {
+		return false
+	}
+	rec.count++
+	if rec.count >= 6 {
+		rec.blockedUntil = time.Now().Add(1 * time.Minute)
+		rec.count = 0
+	}
+	return true
 }

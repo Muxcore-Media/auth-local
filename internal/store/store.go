@@ -300,7 +300,10 @@ func (s *Store) SetPassword(id, password string) error {
 		return err
 	}
 	_, err = s.db.Exec(`UPDATE users SET password = ? WHERE id = ?`, string(hash), id)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.DeleteUserSessions(id)
 }
 
 func (s *Store) SetRoles(id string, roles []string) error {
@@ -399,6 +402,15 @@ func (s *Store) DeleteAPIToken(id string) error {
 	return err
 }
 
+func (s *Store) APITokenUserID(id string) (string, error) {
+	var userID string
+	err := s.db.QueryRow(`SELECT user_id FROM api_tokens WHERE id = ?`, id).Scan(&userID)
+	if err != nil {
+		return "", fmt.Errorf("token not found")
+	}
+	return userID, nil
+}
+
 // --- Password Authentication ---
 
 func (s *Store) VerifyPassword(username, password string) (*User, error) {
@@ -416,10 +428,11 @@ func (s *Store) VerifyPassword(username, password string) (*User, error) {
 
 func (s *Store) CreateSession(userID, kind string, ttl time.Duration) (*Session, error) {
 	token := newSessionToken()
+	hash := sha256Hex(token)
 	expiresAt := time.Now().Add(ttl)
 	_, err := s.db.Exec(
 		`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
-		token, userID, kind, expiresAt.Format(time.RFC3339),
+		hash, userID, kind, expiresAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -436,18 +449,20 @@ func (s *Store) CreatePartialSession(userID string) (*Session, error) {
 }
 
 func (s *Store) GetSession(token string) (*Session, error) {
+	hash := sha256Hex(token)
 	row := s.db.QueryRow(
 		`SELECT token, user_id, kind, expires_at FROM sessions WHERE token = ?`,
-		token,
+		hash,
 	)
 	var sess Session
-	var expiresAt string
-	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Kind, &expiresAt); err != nil {
+	var storedToken, expiresAt string
+	if err := row.Scan(&storedToken, &sess.UserID, &sess.Kind, &expiresAt); err != nil {
 		return nil, fmt.Errorf("session not found")
 	}
+	sess.Token = token
 	sess.ExpiresAt = parseTime(expiresAt)
 	if sess.ExpiresAt.IsZero() {
-		slog.Warn("session has unparseable expiration, treating as expired", "token", sess.Token[:8])
+		slog.Warn("session has unparseable expiration, treating as expired", "token", token[:8])
 		_ = s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
@@ -459,7 +474,8 @@ func (s *Store) GetSession(token string) (*Session, error) {
 }
 
 func (s *Store) DeleteSession(token string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+	hash := sha256Hex(token)
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, hash)
 	return err
 }
 
@@ -477,7 +493,7 @@ func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
 		return nil, fmt.Errorf("session is not a partial token")
 	}
 	// Delete the partial session, create a full one.
-	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, partialToken)
+	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, sha256Hex(partialToken))
 	return s.CreateFullSession(sess.UserID)
 }
 
@@ -485,33 +501,36 @@ func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
 
 func (s *Store) SetTOTPSecret(userID, secret string) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO totp (user_id, secret, enabled, created_at) VALUES (?, ?, 1, datetime('now'))`,
+		`INSERT OR REPLACE INTO totp (user_id, secret, enabled, verified_at, created_at) VALUES (?, ?, 0, '', datetime('now'))`,
 		userID, secret,
 	)
 	return err
 }
 
 func (s *Store) GetTOTPSecret(userID string) (string, bool, error) {
-	row := s.db.QueryRow(`SELECT secret, enabled FROM totp WHERE user_id = ?`, userID)
-	var secret string
+	row := s.db.QueryRow(`SELECT secret, enabled, COALESCE(verified_at, '') FROM totp WHERE user_id = ?`, userID)
+	var secret, verifiedAt string
 	var enabled int
-	if err := row.Scan(&secret, &enabled); err != nil {
+	if err := row.Scan(&secret, &enabled, &verifiedAt); err != nil {
 		return "", false, nil // not found = not enabled
 	}
-	return secret, enabled == 1, nil
+	loginRequired := enabled == 1 && strings.TrimSpace(verifiedAt) != ""
+	return secret, loginRequired, nil
 }
 
 func (s *Store) VerifyTOTPSetup(userID string) error {
-	_, err := s.db.Exec(`UPDATE totp SET verified_at = datetime('now') WHERE user_id = ?`, userID)
+	_, err := s.db.Exec(`UPDATE totp SET enabled = 1, verified_at = datetime('now') WHERE user_id = ?`, userID)
 	return err
 }
 
 func (s *Store) DisableTOTP(userID string) error {
+	if err := s.DeleteUserSessions(userID); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM totp WHERE user_id = ?`, userID)
 	if err != nil {
 		return err
 	}
-	// Also update the users table flag for quick checks.
 	_, err = s.db.Exec(`UPDATE users SET totp_secret = '', totp_enabled = 0 WHERE id = ?`, userID)
 	return err
 }

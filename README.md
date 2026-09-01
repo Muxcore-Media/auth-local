@@ -60,8 +60,23 @@ intentional deny-all, not the builtin fallback.
 | `manager` | `media.*`, `storage.*`, `modules.read`, `modules.manage` |
 | `user` | `media.request`, `media.view`, `media.search` |
 | `viewer` | `media.view`, `media.search` |
+| `module` | `"*"` — mesh callers identified via `x-caller-id` |
 
 Send `SIGHUP` to reload the policy file without restarting.
+
+## Invites and tenancy
+
+Admins create invite links via authenticated `GET|POST /api/invites` and `DELETE /api/invites/{id}` (Bearer session with `admin` role). Allowed invite roles: `user`, `viewer`, `manager`. Users redeem at `/invite?token=…` or `POST /invite/redeem` (CSRF-protected HTML form). JSON helpers: `GET /api/invite/peek`, `POST /api/invite/redeem`.
+
+Optional `tenant_id` on invites is copied onto users created via redeem (household tenancy). Session tokens and `/login/exchange` include `tenant_id` in claims when set.
+
+## Native device login
+
+`POST /login/device` accepts JSON `{username, password}` for TV/mobile clients (no CSRF). When verified TOTP is enabled, the response includes `requires_2fa` and `partial_token`; complete with `POST /login/device/totp`.
+
+## Settings capability
+
+Registers `"settings"` for admin-ui discovery (policy file path, WebAuthn RP config). See `internal/settings.go`.
 
 ## Configuration
 
@@ -71,6 +86,7 @@ Send `SIGHUP` to reload the policy file without restarting.
 |----------|---------|-------------|
 | `AUTH_GRPC_ADDR` | `:9403` | gRPC listen address |
 | `AUTH_HTTP_ADDR` | `:9401` | HTTP listen address (login UI, metrics, WebAuthn) |
+| `AUTH_HTTP_URL` | _(unset)_ | Public base URL for this auth host (e.g. `https://auth.zem.systems`) — used for mobile misredirect hints and absolute links |
 | `AUTH_DB_PATH` | `~/.muxcore/auth.db` | SQLite user/session store |
 | `AUTH_POLICY_FILE` | `policies.yaml` | RBAC policy YAML |
 | `AUTH_RP_ID` | `localhost` | WebAuthn relying party ID |
@@ -100,6 +116,9 @@ auth-local \
 | Path | Description |
 |------|-------------|
 | `/login` … | Browser login UI |
+| `/login/device`, `/login/device/totp` | JSON login for native clients |
+| `/invite`, `/invite/redeem` | Invite redemption UI |
+| `/api/invites`, `/api/invite/peek`, `/api/invite/redeem` | Invite admin + redeem API |
 | `/api/webauthn/...` | WebAuthn register/login (used by login HTML) |
 | `GET /metrics` | Prometheus counters (`auth_login_*`, `auth_sessions_active`) |
 | `GET /health` | Liveness |
@@ -127,7 +146,7 @@ Flags: `-addr` (default `localhost:9403`), `-token` / `AUTHCTL_TOKEN`.
 
 ## Implementation
 
-- Registers with capabilities: `"auth"`, `"authorizer"`, `"identity"`
+- Registers with capabilities: `"auth"`, `"authorizer"`, `"identity"`, `"settings"`
 - Serves `AuthService` gRPC (authenticate, authorize, identity, users, TOTP, WebAuthn, API tokens)
 - SQLite-backed user store (pure-Go via modernc.org/sqlite)
 - Bcrypt password hashing (cost 12)
