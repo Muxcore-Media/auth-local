@@ -45,6 +45,19 @@ func testModule(t *testing.T, policyYAML string) *Module {
 	return m
 }
 
+func TestInfoRegistersGRPCDialAddr(t *testing.T) {
+	m := NewModule(Config{
+		GRPCAddr:   ":9403",
+		HTTPAddr:   ":9401",
+		PolicyFile: filepath.Join(t.TempDir(), "policies.yaml"),
+		DBPath:     filepath.Join(t.TempDir(), "auth.db"),
+	})
+	info := m.Info()
+	if info.HTTPAddr != ":9403" {
+		t.Fatalf("Info().HTTPAddr = %q, want gRPC dial addr :9403 (core WireAuth convention)", info.HTTPAddr)
+	}
+}
+
 func TestInitLoadsPolicy(t *testing.T) {
 	m := testModule(t, `
 roles:

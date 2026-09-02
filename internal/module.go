@@ -164,7 +164,8 @@ func (m *Module) Info() contracts.ModuleInfo {
 		Description:  "Local authentication and authorization provider",
 		Author:       "MuxCore",
 		Capabilities: []string{contracts.CapabilityAuth, contracts.CapabilityAuthorizer, contracts.CapabilityIdentity, "settings"},
-		HTTPAddr:     m.httpAddr,
+		// HTTPAddr is the mesh dial target for AuthService gRPC (core WireAuth convention).
+		HTTPAddr: m.grpcAddr,
 	}
 }
 
