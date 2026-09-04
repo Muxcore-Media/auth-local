@@ -34,7 +34,7 @@ func TestDeviceLoginTOTPFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := server.New(store, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
+	srv := server.New(store, policy.Builtin(), "localhost", []string{"http://localhost"}, "test", nil, nil, nil)
 	sess, err := store.CreateFullSession(user.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestDeviceLoginTOTPFlow(t *testing.T) {
 		t.Fatalf("VerifyTOTPSetup: %v %+v", err, verify)
 	}
 
-	h := webapp.New(store, "http://127.0.0.1:9401", nil)
+	h := webapp.New(store, "http://127.0.0.1:9401", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

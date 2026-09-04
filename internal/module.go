@@ -15,9 +15,13 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
 	"github.com/Muxcore-Media/auth-local/internal/policy"
+	"github.com/Muxcore-Media/auth-local/internal/ratelimit"
+	"github.com/Muxcore-Media/auth-local/internal/revocation"
+	"github.com/Muxcore-Media/auth-local/internal/security"
 	"github.com/Muxcore-Media/auth-local/internal/server"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 	"github.com/Muxcore-Media/auth-local/internal/webapp"
@@ -35,11 +39,8 @@ type Module struct {
 	webHandler     *webapp.Handler
 	grpcLis        net.Listener
 	httpLis        net.Listener
-	sighupCh       chan os.Signal
-	sighupStop     chan struct{}
-	sighupDone     chan struct{}
-	cleanupStop    chan struct{}
-	cleanupDone    chan struct{}
+	runCancel      context.CancelFunc
+	runDone        chan struct{}
 	cfgMu          sync.RWMutex
 	id             string
 	grpcAddr       string
@@ -50,6 +51,10 @@ type Module struct {
 	rpOrigins      []string
 	rpName         string
 	trustedProxies []net.IPNet
+	rateLimiter    *ratelimit.Limiter
+	loginBackoff   *ratelimit.LoginBackoff
+	revocations    *revocation.List
+	secMetrics     *security.Collector
 }
 
 // Config holds module settings. Non-empty fields override environment; empty
@@ -170,10 +175,18 @@ func (m *Module) Info() contracts.ModuleInfo {
 }
 
 func (m *Module) Init(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if dir := filepath.Dir(m.dbPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create db dir: %w", err)
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	var err error
@@ -181,16 +194,30 @@ func (m *Module) Init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init store: %w", err)
 	}
+	m.store.SetSessionConfig(parseSessionConfig())
+
+	m.revocations = revocation.New()
+	m.store.SetRevocationList(m.revocations)
+	m.secMetrics = &security.Collector{}
 
 	pol, err := m.loadPolicy()
 	if err != nil {
 		return err
 	}
-	m.authSrv = server.New(m.store, pol, m.rpID, m.rpOrigins, m.rpName)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	m.waHandler, err = webauthn.New(m.rpID, m.rpOrigins, m.rpName, m.store)
+	m.rateLimiter = ratelimit.New()
+	m.loginBackoff = ratelimit.NewLoginBackoff()
+	m.authSrv = server.New(m.store, pol, m.rpID, m.rpOrigins, m.rpName, m.rateLimiter, m.loginBackoff, m.secMetrics)
+
+	m.waHandler, err = webauthn.New(m.rpID, m.rpOrigins, m.rpName, m.store, m.rateLimiter, m.trustedProxies, m.secMetrics)
 	if err != nil {
 		return fmt.Errorf("init webauthn: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	m.grpcLis, err = net.Listen("tcp", m.grpcAddr)
@@ -199,10 +226,16 @@ func (m *Module) Init(ctx context.Context) error {
 	}
 	m.httpLis, err = net.Listen("tcp", m.httpAddr)
 	if err != nil {
+		_ = m.grpcLis.Close()
 		return fmt.Errorf("listen HTTP %s: %w", m.httpAddr, err)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = m.grpcLis.Close()
+		_ = m.httpLis.Close()
+		return err
+	}
 	publicURL := os.Getenv("AUTH_HTTP_URL")
-	m.webHandler = webapp.New(m.store, publicURL, m.trustedProxies)
+	m.webHandler = webapp.New(m.store, publicURL, m.trustedProxies, m.rateLimiter, m.loginBackoff, m.secMetrics)
 	slog.Info("auth-local initialized",
 		"grpc", m.grpcAddr,
 		"http", m.httpAddr,
@@ -252,122 +285,205 @@ func (m *Module) ReloadPolicy() error {
 }
 
 func (m *Module) Start(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	m.runCancel = runCancel
+
+	g, gCtx := errgroup.WithContext(runCtx)
+
 	m.grpcSrv = grpc.NewServer()
 	m.authSrv.RegisterWithGRPC(m.grpcSrv)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
-	go func() {
-		slog.Info("auth-local gRPC started", "addr", m.grpcAddr)
-		if err := m.grpcSrv.Serve(m.grpcLis); err != nil {
-			slog.Error("auth-local gRPC error", "error", err)
-		}
-	}()
 
 	mux := http.NewServeMux()
 	m.webHandler.RegisterRoutes(mux)
 	m.waHandler.RegisterRoutes(mux)
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+	mux.HandleFunc("/metrics", webapp.MetricsHandler(m.authSrv.Metrics))
+	mux.HandleFunc("/security/dashboard", webapp.SecurityDashboardHandler(m.secMetrics, func() int {
+		if m.store == nil {
+			return 0
 		}
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = w.Write([]byte(m.authSrv.Metrics()))
-	})
+		return m.store.RevocationCount()
+	}))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if err := m.Health(r.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"unhealthy","reason":%q}`, err.Error())))
+			return
+		}
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	m.httpSrv = &http.Server{Handler: mux}
-	go func() {
-		slog.Info("auth-local HTTP started", "addr", m.httpAddr)
-		if err := m.httpSrv.Serve(m.httpLis); err != nil && err != http.ErrServerClosed {
-			slog.Error("auth-local HTTP error", "error", err)
-		}
-	}()
 
-	sighupCh := make(chan os.Signal, 1)
-	sighupStop := make(chan struct{})
-	sighupDone := make(chan struct{})
-	m.sighupCh = sighupCh
-	m.sighupStop = sighupStop
-	m.sighupDone = sighupDone
-	signal.Notify(sighupCh, syscall.SIGHUP)
-	go func() {
-		defer close(sighupDone)
+	g.Go(func() error {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
+
 		for {
 			select {
-			case <-sighupCh:
-				slog.Info("SIGHUP received — reloading RBAC policy")
-				if err := m.ReloadPolicy(); err != nil {
-					slog.Error("policy reload failed", "error", err)
+			case <-gCtx.Done():
+				return nil
+			case sig, ok := <-sigCh:
+				if !ok {
+					return nil
 				}
-			case <-sighupStop:
-				return
+				switch sig {
+				case syscall.SIGHUP:
+					slog.Info("SIGHUP received — reloading RBAC policy")
+					if err := m.ReloadPolicy(); err != nil {
+						slog.Error("policy reload failed", "error", err)
+					}
+				case syscall.SIGINT, syscall.SIGTERM:
+					slog.Info("shutdown signal received", "signal", sig.String())
+					runCancel()
+					return nil
+				}
 			}
 		}
-	}()
+	})
 
-	cleanupStop := make(chan struct{})
-	cleanupDone := make(chan struct{})
-	m.cleanupStop = cleanupStop
-	m.cleanupDone = cleanupDone
-	go func() {
-		defer close(cleanupDone)
+	g.Go(func() error {
+		slog.Info("auth-local gRPC started", "addr", m.grpcAddr)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- m.grpcSrv.Serve(m.grpcLis)
+		}()
+		select {
+		case <-gCtx.Done():
+			m.grpcSrv.GracefulStop()
+			err := <-errCh
+			if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+				slog.Error("auth-local gRPC shutdown error", "error", err)
+			}
+			return nil
+		case err := <-errCh:
+			if err != nil {
+				slog.Error("auth-local gRPC error", "error", err)
+				return err
+			}
+			return nil
+		}
+	})
+
+	g.Go(func() error {
+		slog.Info("auth-local HTTP started", "addr", m.httpAddr)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- m.httpSrv.Serve(m.httpLis)
+		}()
+		select {
+		case <-gCtx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := m.httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("auth-local HTTP shutdown error", "error", err)
+			}
+			err := <-errCh
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("auth-local HTTP serve error after shutdown", "error", err)
+			}
+			return nil
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("auth-local HTTP error", "error", err)
+				return err
+			}
+			return nil
+		}
+	})
+
+	g.Go(func() error {
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-cleanupStop:
-				return
+			case <-gCtx.Done():
+				return nil
 			case <-ticker.C:
 				if err := m.store.CleanupExpiredSessions(); err != nil {
 					slog.Warn("session cleanup failed", "error", err)
 				}
 			}
 		}
+	})
+
+	runDone := make(chan struct{})
+	m.runDone = runDone
+	go func() {
+		defer close(runDone)
+		if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("auth-local runtime error", "error", err)
+		}
 	}()
+
 	return nil
 }
 
 func (m *Module) Stop(ctx context.Context) error {
-	if m.sighupStop != nil {
+	var errs []error
+	logStopErr := func(msg string, err error) {
+		if err == nil {
+			return
+		}
+		slog.Error(msg, "error", err)
+		errs = append(errs, err)
+	}
+
+	if m.runCancel != nil {
+		m.runCancel()
+	}
+	if m.runDone != nil {
 		select {
-		case <-m.sighupStop:
-		default:
-			close(m.sighupStop)
+		case <-m.runDone:
+		case <-ctx.Done():
+			logStopErr("auth-local stop: timed out waiting for background tasks", ctx.Err())
 		}
-		if m.sighupDone != nil {
-			<-m.sighupDone
+	} else {
+		if m.grpcSrv != nil {
+			m.grpcSrv.GracefulStop()
 		}
-	}
-	if m.sighupCh != nil {
-		signal.Stop(m.sighupCh)
-	}
-	if m.cleanupStop != nil {
-		close(m.cleanupStop)
-		if m.cleanupDone != nil {
-			<-m.cleanupDone
+		if m.httpSrv != nil {
+			if err := m.httpSrv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logStopErr("auth-local HTTP shutdown error", err)
+			}
 		}
 	}
+
 	if m.webHandler != nil {
 		m.webHandler.Stop()
 	}
-	if m.grpcSrv != nil {
-		m.grpcSrv.GracefulStop()
+	if m.rateLimiter != nil {
+		m.rateLimiter.Stop()
 	}
-	if m.httpSrv != nil {
-		_ = m.httpSrv.Shutdown(ctx)
+	if m.loginBackoff != nil {
+		m.loginBackoff.Stop()
+	}
+	if m.revocations != nil {
+		m.revocations.Stop()
 	}
 	if m.store != nil {
-		_ = m.store.Close()
+		if err := m.store.Close(); err != nil {
+			logStopErr("auth-local store close error", err)
+		}
 	}
 	slog.Info("auth-local stopped")
-	return nil
+	return errors.Join(errs...)
 }
 
 func (m *Module) Health(ctx context.Context) error {
 	if m.store == nil {
 		return fmt.Errorf("not initialized")
+	}
+	if err := m.store.Ping(ctx); err != nil {
+		return fmt.Errorf("database ping: %w", err)
+	}
+	if m.authSrv == nil || m.authSrv.PolicyRoleCount() == 0 {
+		return fmt.Errorf("policy not loaded")
 	}
 	return nil
 }

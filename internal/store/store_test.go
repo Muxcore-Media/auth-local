@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -267,6 +268,19 @@ func TestDeleteUserSessions(t *testing.T) {
 	users, _ := s.ListUsers()
 	if len(users) != 1 {
 		t.Errorf("expected user to still exist, got %d users", len(users))
+	}
+}
+
+func TestPing(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := s.Ping(context.Background()); err == nil {
+		t.Fatal("expected Ping to fail after Close")
 	}
 }
 

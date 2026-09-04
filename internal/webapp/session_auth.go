@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Muxcore-Media/auth-local/internal/clientip"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -31,7 +32,12 @@ func mustFullSession(w http.ResponseWriter, r *http.Request, store *authStore.St
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return nil
 	}
-	sess, err := store.GetSession(token)
+	check := authStore.SessionCheck{
+		IP:        clientip.ExtractIP(r, nil),
+		UserAgent: r.UserAgent(),
+		TouchIdle: true,
+	}
+	sess, err := store.GetSession(token, check)
 	if err != nil || sess.Kind != "full" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return nil

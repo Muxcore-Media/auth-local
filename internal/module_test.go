@@ -232,6 +232,62 @@ roles:
 	}
 }
 
+func TestHealth(t *testing.T) {
+	m := testModule(t, `
+roles:
+  admin:
+    permissions: ["*"]
+`)
+	if err := m.Health(context.Background()); err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+}
+
+func TestHealthFailsWithEmptyPolicy(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policies.yaml")
+	if err := os.WriteFile(policyPath, []byte("roles: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := NewModule(Config{
+		GRPCAddr:   "127.0.0.1:0",
+		HTTPAddr:   "127.0.0.1:0",
+		PolicyFile: policyPath,
+		DBPath:     filepath.Join(dir, "auth.db"),
+		RPID:       "localhost",
+		RPOrigins:  "http://localhost",
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Stop(ctx) })
+
+	if err := m.Health(ctx); err == nil {
+		t.Fatal("expected Health to fail when policy has no roles")
+	}
+}
+
+func TestHealthHTTPEndpoint(t *testing.T) {
+	m := testModule(t, `
+roles:
+  admin:
+    permissions: ["*"]
+`)
+	resp, err := http.Get("http://" + m.HTTPAddr() + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"status":"ok"`) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
 func TestDBPathUsed(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "custom.db")

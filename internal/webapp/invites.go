@@ -135,6 +135,9 @@ func (h *Handler) apiInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !h.allowClientIP(w, r, "Too many invite redemption attempts") {
+		return
+	}
 	var body struct {
 		Token    string `json:"token"`
 		Username string `json:"username"`
@@ -203,6 +206,9 @@ func (h *Handler) invitePage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) inviteRedeem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.allowClientIP(w, r, "Too many invite redemption attempts") {
 		return
 	}
 	_ = r.ParseForm()

@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/pquerna/otp/totp"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
 	"github.com/Muxcore-Media/auth-local/internal/policy"
+	"github.com/Muxcore-Media/auth-local/internal/ratelimit"
 	"github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -23,7 +26,7 @@ func newTestServer(t *testing.T) *AuthServer {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return New(s, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
+	return New(s, policy.Builtin(), "localhost", []string{"http://localhost"}, "test", ratelimit.New(), nil, nil)
 }
 
 func ctxWithSession(t *testing.T, srv *AuthServer, userID string) context.Context {
@@ -112,11 +115,62 @@ func TestRevoke(t *testing.T) {
 	_, _ = srv.store.CreateUser("alice", "pw")
 	user, _ := srv.store.GetUserByUsername("alice")
 	sess, _ := srv.store.CreateFullSession(user.ID)
+	ctx := ctxWithSession(t, srv, user.ID)
 
-	_, _ = srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
+	_, err := srv.Revoke(ctx, &authv1.RevokeRequest{Token: sess.Token})
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
 	resp, _ := srv.Validate(context.Background(), &authv1.ValidateRequest{Token: sess.Token})
 	if resp.Valid {
 		t.Fatal("expected session to be revoked")
+	}
+}
+
+func TestRevoke_Unauthenticated(t *testing.T) {
+	srv := newTestServer(t)
+	_, _ = srv.store.CreateUser("alice", "pw")
+	user, _ := srv.store.GetUserByUsername("alice")
+	sess, _ := srv.store.CreateFullSession(user.ID)
+
+	_, err := srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("Revoke code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+func TestRevoke_OtherUserDenied(t *testing.T) {
+	srv := newTestServer(t)
+	alice, _ := srv.store.CreateUser("alice", "pw")
+	bob, _ := srv.store.CreateUser("bob", "pw")
+	aliceSess, _ := srv.store.CreateFullSession(alice.ID)
+	bobCtx := ctxWithSession(t, srv, bob.ID)
+
+	_, err := srv.Revoke(bobCtx, &authv1.RevokeRequest{Token: aliceSess.Token})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("Revoke code = %v, want PermissionDenied", status.Code(err))
+	}
+	resp, _ := srv.Validate(context.Background(), &authv1.ValidateRequest{Token: aliceSess.Token})
+	if !resp.Valid {
+		t.Fatal("expected alice session to remain valid")
+	}
+}
+
+func TestRevoke_AdminCanRevokeOther(t *testing.T) {
+	srv := newTestServer(t)
+	alice, _ := srv.store.CreateUser("alice", "pw")
+	admin, _ := srv.store.CreateUser("admin", "pw")
+	_ = srv.store.SetRoles(admin.ID, []string{"admin"})
+	aliceSess, _ := srv.store.CreateFullSession(alice.ID)
+	adminCtx := ctxWithSession(t, srv, admin.ID)
+
+	_, err := srv.Revoke(adminCtx, &authv1.RevokeRequest{Token: aliceSess.Token})
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	resp, _ := srv.Validate(context.Background(), &authv1.ValidateRequest{Token: aliceSess.Token})
+	if resp.Valid {
+		t.Fatal("expected alice session to be revoked by admin")
 	}
 }
 
@@ -146,6 +200,27 @@ func TestCan(t *testing.T) {
 	})
 	if resp2.Allowed {
 		t.Fatal("expected viewer to be denied delete")
+	}
+
+	// Non-existent user without validated caller-id must be denied (not module allow-all).
+	resp3, _ := srv.Can(context.Background(), &authv1.CanRequest{
+		UserId:   "nonexistent-user-id",
+		Action:   "delete",
+		Resource: "anything",
+	})
+	if resp3.Allowed {
+		t.Fatal("expected non-existent user to be denied")
+	}
+
+	// Module caller with matching x-caller-id gets module role.
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-caller-id", "downloader"))
+	resp4, _ := srv.Can(ctx, &authv1.CanRequest{
+		UserId:   "downloader",
+		Action:   "delete",
+		Resource: "anything",
+	})
+	if !resp4.Allowed {
+		t.Fatal("expected validated module caller to be allowed")
 	}
 }
 
@@ -203,7 +278,7 @@ func TestEnableTOTP(t *testing.T) {
 	}
 
 	// TOTP is pending until VerifyTOTPSetup — not required at login yet.
-	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	status, _ := srv.TOTPStatus(ctx, &authv1.TOTPStatusRequest{UserId: user.ID})
 	if status.Enabled {
 		t.Fatal("expected TOTP pending until verified")
 	}
@@ -316,16 +391,35 @@ func TestDisableTOTP(t *testing.T) {
 	code, _ := totp.GenerateCode(enableResp.Secret, time.Now())
 	_, _ = srv.VerifyTOTPSetup(ctx, &authv1.VerifyTOTPSetupRequest{UserId: user.ID, TotpCode: code})
 
-	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	status, _ := srv.TOTPStatus(ctx, &authv1.TOTPStatusRequest{UserId: user.ID})
 	if !status.Enabled {
 		t.Fatal("expected TOTP enabled before disable")
 	}
 
 	_, _ = srv.DisableTOTP(ctx, &authv1.DisableTOTPRequest{UserId: user.ID})
 
-	status, _ = srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	// DisableTOTP invalidates all user sessions; re-authenticate before checking status.
+	ctx = ctxWithSession(t, srv, user.ID)
+	status, _ = srv.TOTPStatus(ctx, &authv1.TOTPStatusRequest{UserId: user.ID})
 	if status.Enabled {
 		t.Fatal("expected TOTP disabled after disable")
+	}
+}
+
+func TestTOTPStatus_Unauthorized(t *testing.T) {
+	srv := newTestServer(t)
+	alice, _ := srv.store.CreateUser("alice", "pw")
+	bob, _ := srv.store.CreateUser("bob", "pw")
+	bobCtx := ctxWithSession(t, srv, bob.ID)
+
+	_, err := srv.TOTPStatus(bobCtx, &authv1.TOTPStatusRequest{UserId: alice.ID})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("TOTPStatus code = %v, want PermissionDenied", status.Code(err))
+	}
+
+	_, err = srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: alice.ID})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("TOTPStatus code = %v, want Unauthenticated", status.Code(err))
 	}
 }
 
@@ -347,5 +441,28 @@ func TestCreateUser_FirstUserIsAdmin(t *testing.T) {
 	}
 	if len(user.Roles) != 1 || user.Roles[0] != "admin" {
 		t.Fatalf("first user roles = %v, want [admin]", user.Roles)
+	}
+}
+
+func TestAuthenticate_RateLimitedResourceExhausted(t *testing.T) {
+	srv := newTestServer(t)
+	_, _ = srv.store.CreateUser("alice", "password123")
+
+	creds, _ := json.Marshal(map[string]string{
+		"username": "alice",
+		"password": "wrong",
+	})
+	for i := 0; i < 6; i++ {
+		_, _ = srv.Authenticate(context.Background(), &authv1.AuthenticateRequest{
+			CredentialType: "password",
+			CredentialData: creds,
+		})
+	}
+	_, err := srv.Authenticate(context.Background(), &authv1.AuthenticateRequest{
+		CredentialType: "password",
+		CredentialData: creds,
+	})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("Authenticate code = %v, want ResourceExhausted", status.Code(err))
 	}
 }

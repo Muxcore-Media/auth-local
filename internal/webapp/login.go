@@ -17,7 +17,12 @@ import (
 
 	"github.com/pquerna/otp/totp"
 
+	"github.com/Muxcore-Media/auth-local/internal/audit"
+	"github.com/Muxcore-Media/auth-local/internal/clientip"
+	"github.com/Muxcore-Media/auth-local/internal/fingerprint"
+	"github.com/Muxcore-Media/auth-local/internal/ratelimit"
 	"github.com/Muxcore-Media/auth-local/internal/redirectallow"
+	"github.com/Muxcore-Media/auth-local/internal/security"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
@@ -42,12 +47,6 @@ type LoginPageData struct {
 	PartialToken string
 }
 
-type loginRateRecord struct {
-	count        int
-	blockedUntil time.Time
-	lastSeen     time.Time
-}
-
 type codeEntry struct {
 	sessToken string
 	expiresAt time.Time
@@ -57,26 +56,40 @@ type Handler struct {
 	store          *authStore.Store
 	publicURL      string
 	trustedProxies []net.IPNet
-	rateMu         sync.Mutex
-	rateRecords    map[string]*loginRateRecord
+	limiter        *ratelimit.Limiter
+	loginBackoff   *ratelimit.LoginBackoff
+	secMetrics     *security.Collector
 	codesMu        sync.Mutex
 	codes          map[string]*codeEntry
 	stopCh         chan struct{}
 }
 
-func New(store *authStore.Store, publicURL string, trustedProxies []net.IPNet) *Handler {
+func New(store *authStore.Store, publicURL string, trustedProxies []net.IPNet, limiter *ratelimit.Limiter, loginBackoff *ratelimit.LoginBackoff, secMetrics *security.Collector) *Handler {
 	if len(trustedProxies) == 0 {
-		trustedProxies = defaultTrustedProxies()
+		trustedProxies = clientip.DefaultTrustedProxies()
 	}
+	if limiter == nil {
+		limiter = ratelimit.New()
+	}
+	if loginBackoff == nil {
+		loginBackoff = ratelimit.NewLoginBackoff()
+	}
+	limiter.SetOnDenied(func(key string, retryAfter time.Duration) {
+		ratelimit.LogDenied("http", key, retryAfter)
+		if secMetrics != nil {
+			secMetrics.RecordRateLimited()
+		}
+	})
 	h := &Handler{
 		store:          store,
 		publicURL:      strings.TrimRight(strings.TrimSpace(publicURL), "/"),
 		trustedProxies: trustedProxies,
-		rateRecords:    make(map[string]*loginRateRecord),
+		limiter:        limiter,
+		loginBackoff:   loginBackoff,
+		secMetrics:     secMetrics,
 		codes:          make(map[string]*codeEntry),
 		stopCh:         make(chan struct{}),
 	}
-	go h.rateLimitCleanup()
 	go h.codeCleanup()
 	return h
 }
@@ -84,6 +97,9 @@ func New(store *authStore.Store, publicURL string, trustedProxies []net.IPNet) *
 // Stop signals the cleanup goroutines to shut down.
 func (h *Handler) Stop() {
 	close(h.stopCh)
+	if h.loginBackoff != nil {
+		h.loginBackoff.Stop()
+	}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -220,6 +236,9 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
+	if !h.allowClientIP(w, r, "Too many exchange attempts") {
+		return
+	}
 
 	var req struct {
 		Code string `json:"code"`
@@ -235,7 +254,7 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, err := h.store.GetSession(sessToken)
+	sess, err := h.store.GetSession(sessToken, h.sessionCheck(r, true))
 	if err != nil {
 		http.Error(w, "session expired", http.StatusUnauthorized)
 		return
@@ -258,46 +277,32 @@ func (h *Handler) exchangeHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- Admin key check ---
-
-func (h *Handler) rateLimitCleanup() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-h.stopCh:
-			return
-		case <-ticker.C:
-			h.rateMu.Lock()
-			cutoff := time.Now().Add(-10 * time.Minute)
-			for ip, rec := range h.rateRecords {
-				if rec.lastSeen.Before(cutoff) {
-					delete(h.rateRecords, ip)
-				}
-			}
-			h.rateMu.Unlock()
-		}
-	}
+func (h *Handler) allowClientIP(w http.ResponseWriter, r *http.Request, message string) bool {
+	return h.allowLogin(w, r, message, "")
 }
 
-func (h *Handler) checkRateLimit(ip string) bool {
-	h.rateMu.Lock()
-	defer h.rateMu.Unlock()
-	rec, exists := h.rateRecords[ip]
-	if !exists {
-		rec = &loginRateRecord{}
-		h.rateRecords[ip] = rec
-	}
-	rec.lastSeen = time.Now()
-	if time.Now().Before(rec.blockedUntil) {
+func (h *Handler) allowLogin(w http.ResponseWriter, r *http.Request, message, username string) bool {
+	ip := h.extractIP(r)
+	if allowed, retryAfter, blockedKey := ratelimit.CheckLoginBackoff(h.loginBackoff, ip, username); !allowed {
+		ratelimit.LogDenied("login_backoff", blockedKey, retryAfter)
+		if h.secMetrics != nil {
+			h.secMetrics.RecordLoginFailed()
+		}
+		ratelimit.WriteHTTPRetryAfter(w, "Too many failed login attempts; try again later", retryAfter)
 		return false
 	}
-	rec.count++
-	if rec.count >= 6 {
-		rec.blockedUntil = time.Now().Add(1 * time.Minute)
-		rec.count = 0
+	if h.limiter.Allow(ip) {
+		return true
 	}
-	return true
+	retryAfter := h.limiter.RetryAfter(ip)
+	if retryAfter <= 0 {
+		retryAfter = time.Minute
+	}
+	if h.secMetrics != nil {
+		h.secMetrics.RecordRateLimited()
+	}
+	ratelimit.WriteHTTPRetryAfter(w, message, retryAfter)
+	return false
 }
 
 // --- Redirect with one-time code ---
@@ -383,31 +388,32 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
-		return
-	}
-
 	if err := r.ParseForm(); err != nil {
 		h.renderLogin(w, r, "Invalid form data")
 		return
 	}
 
-	cookieCSRF, _ := r.Cookie(authCSRFCookie)
-	formCSRF := r.FormValue("csrf_token")
-	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
-		h.renderLogin(w, r, "Invalid form token — please reload and try again")
+	username := r.FormValue("username")
+	if !h.allowLogin(w, r, "Too many login attempts", username) {
 		return
 	}
 
-	username := r.FormValue("username")
+	cookieCSRF, formCSRF, ok := h.verifyCSRF(r, r.FormValue("csrf_token"))
+	if !ok {
+		h.renderLogin(w, r, "Invalid form token — please reload and try again")
+		return
+	}
+	_ = cookieCSRF
+	_ = formCSRF
+
 	password := r.FormValue("password")
 	redirect := safeRedirect(r.URL, r.FormValue("redirect"))
 	if redirect == "/" {
 		redirect = safeRedirect(r.URL, r.URL.Query().Get("redirect"))
 	}
+
+	ip := h.extractIP(r)
+	ua := r.UserAgent()
 
 	if username == "" || password == "" {
 		h.renderLogin(w, r, "Username and password are required")
@@ -417,30 +423,38 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := h.store.VerifyPassword(username, password)
 	if err != nil {
 		slog.Warn("login: password verification failed", "username", username)
+		ratelimit.RecordLoginFailure(h.loginBackoff, ip, username)
+		if h.secMetrics != nil {
+			h.secMetrics.RecordLoginFailed()
+		}
+		audit.LoginFailure(username, "password", "invalid_credentials", ip, ua)
 		h.renderLogin(w, r, "Invalid username or password")
 		return
 	}
+	ratelimit.ResetLoginBackoff(h.loginBackoff, ip, username)
 
 	// Check if TOTP is required.
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
 	if err == nil && totpEnabled && secret != "" {
-		partialSess, err := h.store.CreatePartialSession(user.ID)
+		partialSess, err := h.store.CreatePartialSession(user.ID, h.sessionMeta(r))
 		if err != nil {
 			slog.Error("login: create partial session failed", "error", err)
 			h.renderLogin(w, r, "Internal error")
 			return
 		}
+		h.rotateCSRFCookie(w, r)
 		h.renderTOTP(w, r, partialSess.Token, redirect, "")
 		return
 	}
 
-	sess, err := h.store.CreateFullSession(user.ID)
+	sess, err := h.store.CreateFullSession(user.ID, h.sessionMeta(r))
 	if err != nil {
 		slog.Error("login: create session failed", "error", err)
 		h.renderLogin(w, r, "Internal error")
 		return
 	}
 
+	audit.LoginSuccess(user.ID, user.Username, "password", ip, ua)
 	h.redirectWithCode(w, r, sess.Token, redirect)
 }
 
@@ -452,10 +466,7 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if !h.allowClientIP(w, r, "Too many login attempts") {
 		return
 	}
 
@@ -464,23 +475,26 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieCSRF, _ := r.Cookie(authCSRFCookie)
-	formCSRF := r.FormValue("csrf_token")
-	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
+	cookieCSRF, formCSRF, ok := h.verifyCSRF(r, r.FormValue("csrf_token"))
+	if !ok {
 		h.renderTOTP(w, r, "", "", "Invalid form token — please reload and try again")
 		return
 	}
+	_ = cookieCSRF
+	_ = formCSRF
 
 	partialToken := r.FormValue("partial_token")
 	totpCode := r.FormValue("totp_code")
 	redirect := safeRedirect(r.URL, r.FormValue("redirect"))
+	ip := h.extractIP(r)
+	ua := r.UserAgent()
 
 	if partialToken == "" || totpCode == "" {
 		h.renderTOTP(w, r, partialToken, redirect, "Code is required")
 		return
 	}
 
-	partialSess, err := h.store.GetSession(partialToken)
+	partialSess, err := h.store.GetSession(partialToken, h.sessionCheck(r, false))
 	if err != nil {
 		h.renderLogin(w, r, "Session expired — please log in again")
 		return
@@ -497,17 +511,33 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !totp.Validate(totpCode, secret) {
+		username := partialSess.UserID
+		if user, err := h.store.GetUser(partialSess.UserID); err == nil {
+			username = user.Username
+		}
+		ratelimit.RecordLoginFailure(h.loginBackoff, ip, username)
+		if h.secMetrics != nil {
+			h.secMetrics.RecordLoginFailed()
+		}
+		audit.LoginFailure(partialSess.UserID, "totp", "invalid_code", ip, ua)
 		h.renderTOTP(w, r, partialToken, redirect, "Invalid code — try again")
 		return
 	}
 
-	fullSess, err := h.store.UpgradeSession(partialToken)
+	fullSess, err := h.store.UpgradeSession(partialToken, h.sessionMeta(r))
 	if err != nil {
 		slog.Error("login: upgrade session failed", "error", err)
 		h.renderLogin(w, r, "Internal error")
 		return
 	}
-
+	user, _ := h.store.GetUser(fullSess.UserID)
+	username := ""
+	if user != nil {
+		username = user.Username
+	}
+	ratelimit.ResetLoginBackoff(h.loginBackoff, ip, username)
+	audit.LoginSuccess(fullSess.UserID, username, "totp", ip, ua)
+	h.rotateCSRFCookie(w, r)
 	h.redirectWithCode(w, r, fullSess.Token, redirect)
 }
 
@@ -518,10 +548,7 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if !h.allowClientIP(w, r, "Too many login attempts") {
 		return
 	}
 
@@ -539,17 +566,34 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "username and password required", http.StatusBadRequest)
 		return
 	}
+	if allowed, retryAfter, blockedKey := ratelimit.CheckLoginBackoff(h.loginBackoff, h.extractIP(r), username); !allowed {
+		ratelimit.LogDenied("login_backoff", blockedKey, retryAfter)
+		if h.secMetrics != nil {
+			h.secMetrics.RecordLoginFailed()
+		}
+		ratelimit.WriteHTTPRetryAfter(w, "Too many failed login attempts; try again later", retryAfter)
+		return
+	}
+
+	ip := h.extractIP(r)
+	ua := r.UserAgent()
 
 	user, err := h.store.VerifyPassword(username, password)
 	if err != nil {
 		slog.Warn("device login: password verification failed", "username", username)
+		ratelimit.RecordLoginFailure(h.loginBackoff, ip, username)
+		if h.secMetrics != nil {
+			h.secMetrics.RecordLoginFailed()
+		}
+		audit.LoginFailure(username, "device_password", "invalid_credentials", ip, ua)
 		http.Error(w, "invalid username or password", http.StatusUnauthorized)
 		return
 	}
+	ratelimit.ResetLoginBackoff(h.loginBackoff, ip, username)
 
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
 	if err == nil && totpEnabled && secret != "" {
-		partialSess, err := h.store.CreatePartialSession(user.ID)
+		partialSess, err := h.store.CreatePartialSession(user.ID, h.sessionMeta(r))
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -564,12 +608,13 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, err := h.store.CreateFullSession(user.ID)
+	sess, err := h.store.CreateFullSession(user.ID, h.sessionMeta(r))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	audit.LoginSuccess(user.ID, user.Username, "device_password", ip, ua)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"token":     sess.Token,
@@ -587,10 +632,7 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if !h.allowClientIP(w, r, "Too many login attempts") {
 		return
 	}
 
@@ -609,7 +651,10 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	partialSess, err := h.store.GetSession(partialToken)
+	ip := h.extractIP(r)
+	ua := r.UserAgent()
+
+	partialSess, err := h.store.GetSession(partialToken, h.sessionCheck(r, false))
 	if err != nil {
 		http.Error(w, "session expired", http.StatusUnauthorized)
 		return
@@ -625,11 +670,20 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !totp.Validate(totpCode, secret) {
+		username := partialSess.UserID
+		if user, err := h.store.GetUser(partialSess.UserID); err == nil {
+			username = user.Username
+		}
+		ratelimit.RecordLoginFailure(h.loginBackoff, ip, username)
+		if h.secMetrics != nil {
+			h.secMetrics.RecordLoginFailed()
+		}
+		audit.LoginFailure(partialSess.UserID, "device_totp", "invalid_code", ip, ua)
 		http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
 		return
 	}
 
-	fullSess, err := h.store.UpgradeSession(partialToken)
+	fullSess, err := h.store.UpgradeSession(partialToken, h.sessionMeta(r))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -639,7 +693,9 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	ratelimit.ResetLoginBackoff(h.loginBackoff, ip, user.Username)
 
+	audit.LoginSuccess(user.ID, user.Username, "device_totp", ip, ua)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"token":     fullSess.Token,
@@ -671,12 +727,52 @@ func (h *Handler) setCSRFCookie(w http.ResponseWriter, r *http.Request, token st
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCSRFCookie,
 		Value:    token,
-		Path:     "/login",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   h.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
+}
+
+// rotateCSRFCookie issues a fresh CSRF token after privilege escalation (e.g. password -> TOTP).
+func (h *Handler) rotateCSRFCookie(w http.ResponseWriter, r *http.Request) {
+	h.setCSRFCookie(w, r, generateCSRFToken())
+}
+
+func (h *Handler) verifyCSRF(r *http.Request, formToken string) (*http.Cookie, string, bool) {
+	cookie, err := r.Cookie(authCSRFCookie)
+	if err != nil || cookie == nil || cookie.Value == "" || formToken == "" || formToken != cookie.Value {
+		return nil, "", false
+	}
+	if cookie.Path != "" && cookie.Path != "/" {
+		return nil, "", false
+	}
+	wantSecure := h.cookieSecure(r)
+	if wantSecure && !cookie.Secure {
+		slog.Warn("csrf: secure cookie expected but missing Secure flag")
+		return nil, "", false
+	}
+	return cookie, formToken, true
+}
+
+func (h *Handler) sessionMeta(r *http.Request) authStore.SessionMeta {
+	fp := fingerprint.FromRequest(r, h.trustedProxies)
+	return authStore.SessionMeta{
+		IP:        h.extractIP(r),
+		UserAgent: r.UserAgent(),
+		Device:    fp.Device,
+		Browser:   fp.Browser,
+		Location:  fp.Location,
+	}
+}
+
+func (h *Handler) sessionCheck(r *http.Request, touch bool) authStore.SessionCheck {
+	return authStore.SessionCheck{
+		IP:        h.extractIP(r),
+		UserAgent: r.UserAgent(),
+		TouchIdle: touch,
+	}
 }
 
 func (h *Handler) cookieSecure(r *http.Request) bool {
@@ -690,7 +786,7 @@ func (h *Handler) cookieSecure(r *http.Request) bool {
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if isTrustedProxy(host, h.trustedProxies) &&
+	if clientip.IsTrustedProxy(host, h.trustedProxies) &&
 		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		return true
 	}
@@ -709,75 +805,9 @@ func setSecurityHeaders(w http.ResponseWriter) {
 }
 
 func (h *Handler) extractIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if isTrustedProxy(host, h.trustedProxies) {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			if ip := parseRightmostXFF(fwd); ip != "" {
-				return ip
-			}
-		}
-	}
-	return host
-}
-
-func defaultTrustedProxies() []net.IPNet {
-	return []net.IPNet{
-		{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
-		{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},
-	}
-}
-
-func isTrustedProxy(addr string, trustedProxies []net.IPNet) bool {
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return false
-	}
-	for _, n := range trustedProxies {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-func parseRightmostXFF(xff string) string {
-	parts := strings.Split(xff, ",")
-	if len(parts) == 0 {
-		return ""
-	}
-	rightmost := strings.TrimSpace(parts[len(parts)-1])
-	if rightmost == "" {
-		return ""
-	}
-	if ip := net.ParseIP(rightmost); ip != nil {
-		return ip.String()
-	}
-	return ""
+	return clientip.ExtractIP(r, h.trustedProxies)
 }
 
 func ParseTrustedProxies(cidrs []string) []net.IPNet {
-	if len(cidrs) == 0 {
-		return defaultTrustedProxies()
-	}
-	parsed := make([]net.IPNet, 0, len(cidrs)+1)
-	for _, c := range cidrs {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		_, n, err := net.ParseCIDR(c)
-		if err != nil {
-			slog.Warn("ignoring invalid trusted proxy CIDR", "cidr", c, "error", err)
-			continue
-		}
-		parsed = append(parsed, *n)
-	}
-	if len(parsed) == 0 {
-		return defaultTrustedProxies()
-	}
-	parsed = append(parsed, net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)})
-	return parsed
+	return clientip.ParseTrustedProxies(cidrs)
 }

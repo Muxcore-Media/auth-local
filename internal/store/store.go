@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -8,10 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Muxcore-Media/auth-local/internal/revocation"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -50,16 +53,24 @@ func (u *User) Claims() map[string]any {
 
 // Session represents an authenticated session.
 type Session struct {
-	Token     string    `json:"token"`
-	UserID    string    `json:"user_id"`
-	Kind      string    `json:"kind"` // "full", "partial", "api-token"
-	ExpiresAt time.Time `json:"expires_at"`
+	Token          string    `json:"token"`
+	UserID         string    `json:"user_id"`
+	Kind           string    `json:"kind"` // "full", "partial", "api-token"
+	ExpiresAt      time.Time `json:"expires_at"`
+	LastActivityAt time.Time `json:"last_activity_at,omitempty"`
+	BoundIP        string    `json:"bound_ip,omitempty"`
+	BoundUA        string    `json:"bound_ua,omitempty"`
+	Device         string    `json:"device,omitempty"`
+	Browser        string    `json:"browser,omitempty"`
+	Location       string    `json:"location,omitempty"`
 }
 
 // Store manages users, sessions, and credentials in SQLite.
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+	db            *sql.DB
+	mu            sync.Mutex
+	sessionConfig SessionConfig
+	revocations   *revocation.List
 }
 
 // New opens or creates the SQLite database and runs migrations.
@@ -70,9 +81,15 @@ func New(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1) // SQLite single-writer
 
-	s := &Store{db: db}
+	s := &Store{
+		db:            db,
+		sessionConfig: DefaultSessionConfig(),
+	}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, fmt.Errorf("chmod db: %w", err)
 	}
 	return s, nil
 }
@@ -145,7 +162,68 @@ func (s *Store) migrate() error {
 	if err := s.migrateTenantColumns(); err != nil {
 		return err
 	}
+	if err := s.migrateSessionColumns(); err != nil {
+		return err
+	}
+	if err := s.migrateSessionFingerprintColumns(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) migrateSessionColumns() error {
+	for _, q := range []string{
+		`ALTER TABLE sessions ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN bound_ip TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN bound_ua TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+				continue
+			}
+			return fmt.Errorf("migrate session columns: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateSessionFingerprintColumns() error {
+	for _, q := range []string{
+		`ALTER TABLE sessions ADD COLUMN device TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN browser TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN location TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(q); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+				continue
+			}
+			return fmt.Errorf("migrate session fingerprint columns: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetRevocationList attaches a token revocation list checked on every session lookup.
+func (s *Store) SetRevocationList(list *revocation.List) {
+	s.revocations = list
+}
+
+// RevocationCount returns active entries in the revocation list.
+func (s *Store) RevocationCount() int {
+	if s.revocations == nil {
+		return 0
+	}
+	return s.revocations.Count()
+}
+
+// SetSessionConfig replaces session TTL, idle timeout, and binding options.
+func (s *Store) SetSessionConfig(cfg SessionConfig) {
+	if cfg.TTL <= 0 {
+		cfg.TTL = sessionTTL
+	}
+	s.sessionConfig = cfg
 }
 
 func (s *Store) migrateTenantColumns() error {
@@ -166,6 +244,11 @@ func (s *Store) migrateTenantColumns() error {
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
+
+// Ping verifies the SQLite connection is alive.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
 
 // --- User CRUD ---
 
@@ -361,7 +444,7 @@ func (s *Store) ValidateAPIToken(rawToken string) (*Session, error) {
 	}
 
 	// Create a transient session for the token.
-	sess, err := s.CreateSession(userID, "api-token", 60*time.Second)
+	sess, err := s.CreateSession(userID, "api-token", 60*time.Second, SessionMeta{})
 	if err != nil {
 		return nil, err
 	}
@@ -426,41 +509,85 @@ func (s *Store) VerifyPassword(username, password string) (*User, error) {
 
 // --- Sessions ---
 
-func (s *Store) CreateSession(userID, kind string, ttl time.Duration) (*Session, error) {
+func (s *Store) CreateSession(userID, kind string, ttl time.Duration, meta SessionMeta) (*Session, error) {
 	token := newSessionToken()
 	hash := sha256Hex(token)
-	expiresAt := time.Now().Add(ttl)
+	now := time.Now()
+	expiresAt := now.Add(ttl)
+	boundIP, boundUA := "", ""
+	device, browser, location := "", "", ""
+	if s.sessionConfig.BindIP && strings.TrimSpace(meta.IP) != "" {
+		boundIP = strings.TrimSpace(meta.IP)
+	}
+	if s.sessionConfig.BindUA && strings.TrimSpace(meta.UserAgent) != "" {
+		boundUA = strings.TrimSpace(meta.UserAgent)
+	}
+	device = strings.TrimSpace(meta.Device)
+	browser = strings.TrimSpace(meta.Browser)
+	location = strings.TrimSpace(meta.Location)
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
-		hash, userID, kind, expiresAt.Format(time.RFC3339),
+		`INSERT INTO sessions (token, user_id, kind, expires_at, last_activity_at, bound_ip, bound_ua, device, browser, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hash, userID, kind, expiresAt.Format(time.RFC3339), now.Format(time.RFC3339), boundIP, boundUA, device, browser, location,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
-	return &Session{Token: token, UserID: userID, Kind: kind, ExpiresAt: expiresAt}, nil
+	return &Session{
+		Token:          token,
+		UserID:         userID,
+		Kind:           kind,
+		ExpiresAt:      expiresAt,
+		LastActivityAt: now,
+		BoundIP:        boundIP,
+		BoundUA:        boundUA,
+		Device:         device,
+		Browser:        browser,
+		Location:       location,
+	}, nil
 }
 
-func (s *Store) CreateFullSession(userID string) (*Session, error) {
-	return s.CreateSession(userID, "full", sessionTTL)
+func (s *Store) CreateFullSession(userID string, meta ...SessionMeta) (*Session, error) {
+	m := SessionMeta{}
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	ttl := s.sessionConfig.TTL
+	if ttl <= 0 {
+		ttl = sessionTTL
+	}
+	return s.CreateSession(userID, "full", ttl, m)
 }
 
-func (s *Store) CreatePartialSession(userID string) (*Session, error) {
-	return s.CreateSession(userID, "partial", 5*time.Minute)
+func (s *Store) CreatePartialSession(userID string, meta ...SessionMeta) (*Session, error) {
+	m := SessionMeta{}
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	return s.CreateSession(userID, "partial", 5*time.Minute, m)
 }
 
-func (s *Store) GetSession(token string) (*Session, error) {
+func (s *Store) GetSession(token string, check ...SessionCheck) (*Session, error) {
 	hash := sha256Hex(token)
+	if s.revocations != nil && s.revocations.Contains(hash) {
+		return nil, fmt.Errorf("session revoked")
+	}
 	row := s.db.QueryRow(
-		`SELECT token, user_id, kind, expires_at FROM sessions WHERE token = ?`,
+		`SELECT token, user_id, kind, expires_at, COALESCE(last_activity_at,''), COALESCE(bound_ip,''), COALESCE(bound_ua,''), COALESCE(device,''), COALESCE(browser,''), COALESCE(location,'') FROM sessions WHERE token = ?`,
 		hash,
 	)
 	var sess Session
-	var storedToken, expiresAt string
-	if err := row.Scan(&storedToken, &sess.UserID, &sess.Kind, &expiresAt); err != nil {
+	var storedToken, expiresAt, lastActivityAt, boundIP, boundUA, device, browser, location string
+	if err := row.Scan(&storedToken, &sess.UserID, &sess.Kind, &expiresAt, &lastActivityAt, &boundIP, &boundUA, &device, &browser, &location); err != nil {
 		return nil, fmt.Errorf("session not found")
 	}
 	sess.Token = token
 	sess.ExpiresAt = parseTime(expiresAt)
+	sess.LastActivityAt = parseTime(lastActivityAt)
+	sess.BoundIP = boundIP
+	sess.BoundUA = boundUA
+	sess.Device = device
+	sess.Browser = browser
+	sess.Location = location
 	if sess.ExpiresAt.IsZero() {
 		slog.Warn("session has unparseable expiration, treating as expired", "token", token[:8])
 		_ = s.DeleteSession(token)
@@ -470,11 +597,43 @@ func (s *Store) GetSession(token string) (*Session, error) {
 		_ = s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
+	if s.sessionConfig.IdleTimeout > 0 {
+		last := sess.LastActivityAt
+		if last.IsZero() {
+			last = sess.ExpiresAt.Add(-s.sessionConfig.TTL)
+		}
+		if time.Since(last) > s.sessionConfig.IdleTimeout {
+			_ = s.DeleteSession(token)
+			return nil, fmt.Errorf("session idle timeout")
+		}
+	}
+	var chk SessionCheck
+	if len(check) > 0 {
+		chk = check[0]
+	}
+	if sess.BoundIP != "" && chk.IP != "" && sess.BoundIP != strings.TrimSpace(chk.IP) {
+		return nil, fmt.Errorf("session ip binding mismatch")
+	}
+	if sess.BoundUA != "" && chk.UserAgent != "" && sess.BoundUA != strings.TrimSpace(chk.UserAgent) {
+		return nil, fmt.Errorf("session user-agent binding mismatch")
+	}
+	if chk.TouchIdle {
+		now := time.Now()
+		_, _ = s.db.Exec(`UPDATE sessions SET last_activity_at = ? WHERE token = ?`, now.Format(time.RFC3339), hash)
+		sess.LastActivityAt = now
+	}
 	return &sess, nil
 }
 
 func (s *Store) DeleteSession(token string) error {
 	hash := sha256Hex(token)
+	retain := s.sessionConfig.TTL
+	if retain <= 0 {
+		retain = sessionTTL
+	}
+	if s.revocations != nil {
+		s.revocations.Add(hash, retain)
+	}
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, hash)
 	return err
 }
@@ -484,7 +643,7 @@ func (s *Store) DeleteUserSessions(userID string) error {
 	return err
 }
 
-func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
+func (s *Store) UpgradeSession(partialToken string, meta ...SessionMeta) (*Session, error) {
 	sess, err := s.GetSession(partialToken)
 	if err != nil {
 		return nil, err
@@ -492,9 +651,27 @@ func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
 	if sess.Kind != "partial" {
 		return nil, fmt.Errorf("session is not a partial token")
 	}
+	m := SessionMeta{IP: sess.BoundIP, UserAgent: sess.BoundUA, Device: sess.Device, Browser: sess.Browser, Location: sess.Location}
+	if len(meta) > 0 {
+		if meta[0].IP != "" {
+			m.IP = meta[0].IP
+		}
+		if meta[0].UserAgent != "" {
+			m.UserAgent = meta[0].UserAgent
+		}
+		if meta[0].Device != "" {
+			m.Device = meta[0].Device
+		}
+		if meta[0].Browser != "" {
+			m.Browser = meta[0].Browser
+		}
+		if meta[0].Location != "" {
+			m.Location = meta[0].Location
+		}
+	}
 	// Delete the partial session, create a full one.
 	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, sha256Hex(partialToken))
-	return s.CreateFullSession(sess.UserID)
+	return s.CreateFullSession(sess.UserID, m)
 }
 
 // --- TOTP ---

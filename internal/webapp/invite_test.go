@@ -37,7 +37,7 @@ func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	token := adminSession(t, st)
-	h := New(st, "127.0.0.1:0", nil)
+	h := New(st, "127.0.0.1:0", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

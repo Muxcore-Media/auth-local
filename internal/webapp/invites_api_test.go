@@ -18,7 +18,7 @@ func TestAPIInvitePeekAndRedeem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := &Handler{store: st}
+	h := New(st, "http://127.0.0.1:9401", nil, nil, nil, nil)
 	inv, err := st.CreateInvite("admin", "viewer", "", 1, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)

@@ -12,6 +12,19 @@ import (
 )
 
 const authTokenMetadataKey = "x-auth-token"
+const callerIDMetadataKey = "x-caller-id"
+
+func callerIDFromContext(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	vals := md.Get(callerIDMetadataKey)
+	if len(vals) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(vals[0])
+}
 
 func sessionTokenFromContext(ctx context.Context) string {
 	md, ok := metadata.FromIncomingContext(ctx)

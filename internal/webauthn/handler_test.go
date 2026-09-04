@@ -18,7 +18,7 @@ func newTestHandler(t *testing.T) (*Handler, *authStore.Store) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	h, err := New("localhost", []string{"http://localhost:8080"}, "MuxCore Test", st)
+	h, err := New("localhost", []string{"http://localhost:8080"}, "MuxCore Test", st, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -124,8 +124,19 @@ func TestBeginLoginNonexistentUser(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Mux().ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (anti-enumeration), got %d: %s", w.Code, w.Body.String())
+	}
+	var options map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&options); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	pk, ok := options["publicKey"].(map[string]any)
+	if !ok {
+		t.Fatal("expected publicKey in response")
+	}
+	if pk["challenge"] == nil {
+		t.Error("expected challenge in publicKey")
 	}
 }
 
@@ -162,4 +173,23 @@ func TestCompleteRegistrationWithoutBody(t *testing.T) {
 func TestStoreSatisfiesInterface(t *testing.T) {
 	h, _ := newTestHandler(t)
 	_ = h.store // compile-time check: *store.Store implements WebAuthnStore
+}
+
+func TestBeginLoginRateLimit(t *testing.T) {
+	h, st := newTestHandler(t)
+	_, _ = st.CreateUser("alice", "password123")
+
+	ip := "203.0.113.99:12345"
+	for i := 0; i < 7; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/webauthn/login/begin?username=alice", nil)
+		req.RemoteAddr = ip
+		w := httptest.NewRecorder()
+		h.beginLogin(w, req)
+		if i < 6 && w.Code == http.StatusTooManyRequests {
+			t.Fatalf("unexpected rate limit on attempt %d", i+1)
+		}
+		if i == 6 && w.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt 7: status %d want 429", w.Code)
+		}
+	}
 }

@@ -7,7 +7,7 @@ import (
 )
 
 func TestExtractIPTrustedXFF(t *testing.T) {
-	h := New(nil, ":9401", nil)
+	h := New(nil, ":9401", nil, nil, nil, nil)
 	t.Cleanup(h.Stop)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
@@ -18,7 +18,7 @@ func TestExtractIPTrustedXFF(t *testing.T) {
 }
 
 func TestExtractIPUntrustedXFFIgnored(t *testing.T) {
-	h := New(nil, ":9401", nil)
+	h := New(nil, ":9401", nil, nil, nil, nil)
 	t.Cleanup(h.Stop)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "192.168.1.50:9999"
@@ -29,7 +29,7 @@ func TestExtractIPUntrustedXFFIgnored(t *testing.T) {
 }
 
 func TestExtractIPXRealIPIgnored(t *testing.T) {
-	h := New(nil, ":9401", nil)
+	h := New(nil, ":9401", nil, nil, nil, nil)
 	t.Cleanup(h.Stop)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
@@ -40,7 +40,7 @@ func TestExtractIPXRealIPIgnored(t *testing.T) {
 }
 
 func TestExtractIPRightmostXFF(t *testing.T) {
-	h := New(nil, ":9401", nil)
+	h := New(nil, ":9401", nil, nil, nil, nil)
 	t.Cleanup(h.Stop)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "127.0.0.1:12345"

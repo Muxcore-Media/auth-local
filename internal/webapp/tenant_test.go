@@ -28,7 +28,7 @@ func TestLoginExchangeIncludesTenantClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(st, "127.0.0.1:0", nil)
+	h := New(st, "127.0.0.1:0", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -67,7 +67,7 @@ func TestInviteAPIAcceptsTenant(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	h := New(st, "127.0.0.1:0", nil)
+	h := New(st, "127.0.0.1:0", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

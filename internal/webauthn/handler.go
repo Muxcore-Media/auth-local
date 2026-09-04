@@ -5,22 +5,33 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/Muxcore-Media/auth-local/internal/audit"
+	"github.com/Muxcore-Media/auth-local/internal/clientip"
+	"github.com/Muxcore-Media/auth-local/internal/fingerprint"
+	"github.com/Muxcore-Media/auth-local/internal/ratelimit"
 	"github.com/Muxcore-Media/auth-local/internal/redirectallow"
+	"github.com/Muxcore-Media/auth-local/internal/security"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
 // Handler provides HTTP endpoints for WebAuthn registration and authentication.
 type Handler struct {
-	webPtr atomic.Pointer[webauthn.WebAuthn]
-	store  *authStore.Store
+	webPtr         atomic.Pointer[webauthn.WebAuthn]
+	store          *authStore.Store
+	limiter        *ratelimit.Limiter
+	trustedProxies []net.IPNet
+	secMetrics     *security.Collector
 }
 
 // webUser wraps store.User to implement webauthn.User.
@@ -34,8 +45,14 @@ func (u *webUser) WebAuthnName() string                       { return u.store.U
 func (u *webUser) WebAuthnDisplayName() string                { return u.store.Username }
 func (u *webUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
-func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store) (*Handler, error) {
-	h := &Handler{store: store}
+func New(rpID string, rpOrigins []string, rpName string, store *authStore.Store, limiter *ratelimit.Limiter, trustedProxies []net.IPNet, secMetrics *security.Collector) (*Handler, error) {
+	if limiter == nil {
+		limiter = ratelimit.New()
+	}
+	if len(trustedProxies) == 0 {
+		trustedProxies = clientip.DefaultTrustedProxies()
+	}
+	h := &Handler{store: store, limiter: limiter, trustedProxies: trustedProxies, secMetrics: secMetrics}
 	if err := h.Reconfigure(rpID, rpOrigins, rpName); err != nil {
 		return nil, err
 	}
@@ -150,6 +167,9 @@ func (h *Handler) beginRegistration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "save failed")
 		return
 	}
+	ip := clientip.ExtractIP(r, h.trustedProxies)
+	audit.WebAuthnCeremony("register_begin", "success", user.store.ID, user.store.Username, sessionData.Challenge, ip, r.UserAgent())
+	h.recordWebAuthnCeremony()
 
 	writeJSON(w, http.StatusOK, options)
 }
@@ -180,18 +200,26 @@ func (h *Handler) completeRegistration(w http.ResponseWriter, r *http.Request) {
 	_ = h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
 	credential, err := h.web().FinishRegistration(user, sessionData, r)
+	ip := clientip.ExtractIP(r, h.trustedProxies)
 	if err != nil {
 		slog.Error("webauthn: finish registration", "error", err)
+		audit.WebAuthnCeremony("register_complete", "failure", user.store.ID, user.store.Username, sessionData.Challenge, ip, r.UserAgent())
+		h.recordWebAuthnCeremony()
 		writeError(w, http.StatusBadRequest, "registration verification failed")
 		return
 	}
 
 	h.saveCredential(user.store.ID, credential)
+	audit.WebAuthnCeremony("register_complete", "success", user.store.ID, user.store.Username, sessionData.Challenge, ip, r.UserAgent())
+	h.recordWebAuthnCeremony()
 	slog.Info("webauthn: credential registered", "user", user.store.Username)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "registered"})
 }
 
 func (h *Handler) beginLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.allowClientIP(w, r) {
+		return
+	}
 	username := r.URL.Query().Get("username")
 	if username == "" {
 		writeError(w, http.StatusBadRequest, "username is required")
@@ -199,12 +227,19 @@ func (h *Handler) beginLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := h.loadUserByUsername(username)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
-		return
-	}
+	var options *protocol.CredentialAssertion
+	var sessionData *webauthn.SessionData
+	var sessionUserID string
 
-	options, sessionData, err := h.web().BeginLogin(user)
+	if err != nil {
+		// Anti-enumeration: unknown usernames still receive a valid challenge.
+		// completeLogin fails naturally during verification.
+		options, sessionData, err = h.web().BeginDiscoverableLogin()
+		sessionUserID = ""
+	} else {
+		options, sessionData, err = h.web().BeginLogin(user)
+		sessionUserID = user.store.ID
+	}
 	if err != nil {
 		slog.Error("webauthn: begin login", "error", err)
 		writeError(w, http.StatusInternalServerError, "login initiation failed")
@@ -212,16 +247,26 @@ func (h *Handler) beginLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sd, _ := json.Marshal(sessionData)
-	if err := h.store.SaveWebAuthnSession(user.store.ID, sessionData.Challenge, sd); err != nil {
+	if err := h.store.SaveWebAuthnSession(sessionUserID, sessionData.Challenge, sd); err != nil {
 		slog.Error("webauthn: save session", "error", err)
 		writeError(w, http.StatusInternalServerError, "save failed")
 		return
 	}
+	ip := clientip.ExtractIP(r, h.trustedProxies)
+	displayUser := username
+	if displayUser == "" {
+		displayUser = sessionUserID
+	}
+	audit.WebAuthnCeremony("authenticate_begin", "success", sessionUserID, displayUser, sessionData.Challenge, ip, r.UserAgent())
+	h.recordWebAuthnCeremony()
 
 	writeJSON(w, http.StatusOK, options)
 }
 
 func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.allowClientIP(w, r) {
+		return
+	}
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read body")
@@ -257,20 +302,32 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	credential, err := h.web().FinishLogin(user, sessionData, r)
+	ip := clientip.ExtractIP(r, h.trustedProxies)
 	if err != nil {
 		slog.Error("webauthn: finish login", "error", err)
+		audit.WebAuthnCeremony("authenticate_complete", "failure", user.store.ID, user.store.Username, challenge, ip, r.UserAgent())
+		h.recordWebAuthnCeremony()
 		writeError(w, http.StatusUnauthorized, "authentication failed")
 		return
 	}
 
 	h.saveCredential(user.store.ID, credential)
 
-	sess, err := h.store.CreateFullSession(user.store.ID)
+	fp := fingerprint.FromRequest(r, h.trustedProxies)
+	sess, err := h.store.CreateFullSession(user.store.ID, authStore.SessionMeta{
+		IP:        ip,
+		UserAgent: r.UserAgent(),
+		Device:    fp.Device,
+		Browser:   fp.Browser,
+		Location:  fp.Location,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session creation failed")
 		return
 	}
 
+	audit.WebAuthnCeremony("authenticate_complete", "success", user.store.ID, user.store.Username, challenge, ip, r.UserAgent())
+	h.recordWebAuthnCeremony()
 	slog.Info("webauthn: login successful", "user", user.store.Username)
 
 	redirect := safeRedirectURL(r, r.URL.Query().Get("redirect"))
@@ -281,6 +338,24 @@ func (h *Handler) completeLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // Helpers
+
+func (h *Handler) allowClientIP(w http.ResponseWriter, r *http.Request) bool {
+	ip := clientip.ExtractIP(r, h.trustedProxies)
+	if h.limiter.Allow(ip) {
+		return true
+	}
+	retryAfter := h.limiter.RetryAfter(ip)
+	if retryAfter <= 0 {
+		retryAfter = time.Minute
+	}
+	if h.secMetrics != nil {
+		h.secMetrics.RecordRateLimited()
+	}
+	ratelimit.LogDenied("webauthn", ip, retryAfter)
+	w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+	writeError(w, http.StatusTooManyRequests, "Too many login attempts")
+	return false
+}
 
 func mustAuth(w http.ResponseWriter, r *http.Request, store *authStore.Store) *authStore.Session {
 	token := extractBearerToken(r)
@@ -424,6 +499,9 @@ func (h *Handler) beginAdminRegistration(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "save failed")
 		return
 	}
+	ip := clientip.ExtractIP(r, h.trustedProxies)
+	audit.WebAuthnCeremony("register_begin", "success", user.store.ID, user.store.Username, sessionData.Challenge, ip, r.UserAgent())
+	h.recordWebAuthnCeremony()
 
 	writeJSON(w, http.StatusOK, options)
 }
@@ -463,15 +541,26 @@ func (h *Handler) completeAdminRegistration(w http.ResponseWriter, r *http.Reque
 	_ = h.store.DeleteWebAuthnSession(sessionData.Challenge)
 
 	credential, err := h.web().FinishRegistration(user, sessionData, r)
+	ip := clientip.ExtractIP(r, h.trustedProxies)
 	if err != nil {
 		slog.Error("webauthn: finish admin registration", "error", err)
+		audit.WebAuthnCeremony("register_complete", "failure", user.store.ID, user.store.Username, sessionData.Challenge, ip, r.UserAgent())
+		h.recordWebAuthnCeremony()
 		writeError(w, http.StatusBadRequest, "registration verification failed")
 		return
 	}
 
 	h.saveCredential(user.store.ID, credential)
+	audit.WebAuthnCeremony("register_complete", "success", user.store.ID, user.store.Username, sessionData.Challenge, ip, r.UserAgent())
+	h.recordWebAuthnCeremony()
 	slog.Info("webauthn: credential registered via admin", "user", user.store.Username)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "registered"})
+}
+
+func (h *Handler) recordWebAuthnCeremony() {
+	if h.secMetrics != nil {
+		h.secMetrics.RecordWebAuthnCeremony()
+	}
 }
 
 // safeRedirectURL validates the redirect param to prevent open redirect attacks.

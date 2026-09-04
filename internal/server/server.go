@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,17 +22,14 @@ import (
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
+	"github.com/Muxcore-Media/auth-local/internal/audit"
 	"github.com/Muxcore-Media/auth-local/internal/policy"
+	"github.com/Muxcore-Media/auth-local/internal/ratelimit"
+	"github.com/Muxcore-Media/auth-local/internal/security"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
 const issuerName = "MuxCore"
-
-type loginRateRecord struct {
-	count        int
-	blockedUntil time.Time
-	lastSeen     time.Time
-}
 
 // AuthServer implements the AuthService gRPC server.
 type AuthServer struct {
@@ -44,8 +41,9 @@ type AuthServer struct {
 	rpID         string
 	rpOrigins    []string
 	rpName       string
-	rateMu       sync.Mutex
-	rateRecords  map[string]*loginRateRecord
+	limiter      *ratelimit.Limiter
+	loginBackoff *ratelimit.LoginBackoff
+	secMetrics   *security.Collector
 }
 
 // Metrics returns Prometheus-format metrics.
@@ -61,18 +59,50 @@ func (s *AuthServer) Metrics() string {
 		b.WriteString("# HELP auth_sessions_active Current active sessions\n")
 		b.WriteString("# TYPE auth_sessions_active gauge\n")
 		fmt.Fprintf(&b, "auth_sessions_active %d\n", s.store.SessionCount())
+		b.WriteString("# HELP auth_revocation_list_active Revoked tokens still blocked\n")
+		b.WriteString("# TYPE auth_revocation_list_active gauge\n")
+		fmt.Fprintf(&b, "auth_revocation_list_active %d\n", s.store.RevocationCount())
+	}
+	if s.secMetrics != nil {
+		b.WriteString(s.secMetrics.Prometheus())
 	}
 	return b.String()
 }
 
-func New(s *authStore.Store, p *policy.Policy, rpID string, rpOrigins []string, rpName string) *AuthServer {
+// SecurityDashboard returns a JSON-serializable security summary.
+func (s *AuthServer) SecurityDashboard() map[string]any {
+	if s.secMetrics == nil {
+		return map[string]any{}
+	}
+	count := 0
+	if s.store != nil {
+		count = s.store.RevocationCount()
+	}
+	return s.secMetrics.Dashboard(count)
+}
+
+func New(s *authStore.Store, p *policy.Policy, rpID string, rpOrigins []string, rpName string, limiter *ratelimit.Limiter, loginBackoff *ratelimit.LoginBackoff, secMetrics *security.Collector) *AuthServer {
+	if limiter == nil {
+		limiter = ratelimit.New()
+	}
+	if loginBackoff == nil {
+		loginBackoff = ratelimit.NewLoginBackoff()
+	}
+	limiter.SetOnDenied(func(key string, retryAfter time.Duration) {
+		ratelimit.LogDenied("grpc", key, retryAfter)
+		if secMetrics != nil {
+			secMetrics.RecordRateLimited()
+		}
+	})
 	return &AuthServer{
-		store:       s,
-		policy:      p,
-		rpID:        rpID,
-		rpOrigins:   rpOrigins,
-		rpName:      rpName,
-		rateRecords: make(map[string]*loginRateRecord),
+		store:        s,
+		policy:       p,
+		rpID:         rpID,
+		rpOrigins:    rpOrigins,
+		rpName:       rpName,
+		limiter:      limiter,
+		loginBackoff: loginBackoff,
+		secMetrics:   secMetrics,
 	}
 }
 
@@ -125,28 +155,44 @@ func (s *AuthServer) authPassword(ctx context.Context, req *authv1.AuthenticateR
 		return nil, status.Error(codes.InvalidArgument, "invalid credential data")
 	}
 
-	if !s.checkRateLimit(rateLimitKey(ctx, creds.Username)) {
+	if !s.limiter.Allow(rateLimitKey(ctx, creds.Username)) {
 		s.loginFailed.Add(1)
-		return &authv1.AuthenticateResponse{
-			Authenticated: false,
-			Error:         "too many login attempts; try again in one minute",
-		}, nil
+		if s.secMetrics != nil {
+			s.secMetrics.RecordRateLimited()
+		}
+		return nil, status.Error(codes.ResourceExhausted, "too many login attempts; try again in one minute")
+	}
+	ip := peerIP(ctx)
+	if allowed, retryAfter, blockedKey := ratelimit.CheckLoginBackoff(s.loginBackoff, ip, creds.Username); !allowed {
+		s.loginFailed.Add(1)
+		ratelimit.LogDenied("login_backoff", blockedKey, retryAfter)
+		if s.secMetrics != nil {
+			s.secMetrics.RecordLoginFailed()
+		}
+		return nil, status.Errorf(codes.ResourceExhausted, "too many failed login attempts; retry in %ds", int(retryAfter.Seconds()))
 	}
 
 	user, err := s.store.VerifyPassword(creds.Username, creds.Password)
 	if err != nil {
 		slog.Warn("auth: password verification failed", "username", creds.Username)
 		s.loginFailed.Add(1)
+		ratelimit.RecordLoginFailure(s.loginBackoff, ip, creds.Username)
+		if s.secMetrics != nil {
+			s.secMetrics.RecordLoginFailed()
+		}
+		audit.LoginFailure(creds.Username, "grpc_password", "invalid_credentials", ip, "")
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
 			Error:         "invalid username or password",
 		}, nil
 	}
+	ratelimit.ResetLoginBackoff(s.loginBackoff, ip, creds.Username)
+	meta := authStore.SessionMeta{IP: ip}
 
 	// Check if TOTP is enabled.
 	_, enabled, err := s.store.GetTOTPSecret(user.ID)
 	if err == nil && enabled {
-		sess, err := s.store.CreatePartialSession(user.ID)
+		sess, err := s.store.CreatePartialSession(user.ID, meta)
 		if err != nil {
 			return nil, status.Error(codes.Internal, "create partial session failed")
 		}
@@ -160,11 +206,12 @@ func (s *AuthServer) authPassword(ctx context.Context, req *authv1.AuthenticateR
 		}, nil
 	}
 
-	sess, err := s.store.CreateFullSession(user.ID)
+	sess, err := s.store.CreateFullSession(user.ID, meta)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "create session failed")
 	}
 	s.loginSuccess.Add(1)
+	audit.LoginSuccess(user.ID, user.Username, "grpc_password", ip, "")
 	return &authv1.AuthenticateResponse{
 		Authenticated: true,
 		SessionToken:  sess.Token,
@@ -190,12 +237,9 @@ func (s *AuthServer) authTOTP(ctx context.Context, req *authv1.AuthenticateReque
 		}, nil
 	}
 
-	if !s.checkRateLimit("totp:" + creds.PartialToken) {
+	if !s.limiter.Allow("totp:" + creds.PartialToken) {
 		s.loginFailed.Add(1)
-		return &authv1.AuthenticateResponse{
-			Authenticated: false,
-			Error:         "too many login attempts; try again in one minute",
-		}, nil
+		return nil, status.Error(codes.ResourceExhausted, "too many login attempts; try again in one minute")
 	}
 
 	// Validate the partial session.
@@ -227,6 +271,16 @@ func (s *AuthServer) authTOTP(ctx context.Context, req *authv1.AuthenticateReque
 	if !totp.Validate(creds.TOTPCode, secret) {
 		slog.Warn("auth: invalid TOTP code", "user_id", partialSess.UserID)
 		s.loginFailed.Add(1)
+		user, _ := s.store.GetUser(partialSess.UserID)
+		username := partialSess.UserID
+		if user != nil {
+			username = user.Username
+		}
+		ratelimit.RecordLoginFailure(s.loginBackoff, peerIP(ctx), username)
+		if s.secMetrics != nil {
+			s.secMetrics.RecordLoginFailed()
+		}
+		audit.LoginFailure(partialSess.UserID, "grpc_totp", "invalid_code", peerIP(ctx), "")
 		return &authv1.AuthenticateResponse{
 			Authenticated: false,
 			Error:         "invalid TOTP code",
@@ -234,15 +288,17 @@ func (s *AuthServer) authTOTP(ctx context.Context, req *authv1.AuthenticateReque
 	}
 
 	// Upgrade partial session to full.
-	fullSess, err := s.store.UpgradeSession(creds.PartialToken)
+	fullSess, err := s.store.UpgradeSession(creds.PartialToken, authStore.SessionMeta{IP: peerIP(ctx)})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "upgrade session failed")
 	}
-	s.loginSuccess.Add(1)
 	user, err := s.store.GetUser(fullSess.UserID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "lookup user")
 	}
+	ratelimit.ResetLoginBackoff(s.loginBackoff, peerIP(ctx), user.Username)
+	s.loginSuccess.Add(1)
+	audit.LoginSuccess(user.ID, user.Username, "grpc_totp", peerIP(ctx), "")
 
 	return &authv1.AuthenticateResponse{
 		Authenticated: true,
@@ -292,7 +348,8 @@ func (s *AuthServer) authAPIKey(req *authv1.AuthenticateRequest) (*authv1.Authen
 }
 
 func (s *AuthServer) Validate(ctx context.Context, req *authv1.ValidateRequest) (*authv1.ValidateResponse, error) {
-	sess, err := s.store.GetSession(req.Token)
+	check := authStore.SessionCheck{IP: peerIP(ctx), TouchIdle: true}
+	sess, err := s.store.GetSession(req.Token, check)
 	if err != nil {
 		return &authv1.ValidateResponse{Valid: false, Error: "invalid or expired token"}, nil
 	}
@@ -315,6 +372,26 @@ func (s *AuthServer) Validate(ctx context.Context, req *authv1.ValidateRequest) 
 }
 
 func (s *AuthServer) Revoke(ctx context.Context, req *authv1.RevokeRequest) (*authv1.RevokeResponse, error) {
+	ip := peerIP(ctx)
+	if sess, err := s.store.GetSession(req.Token); err == nil {
+		if err := s.requireSelfOrAdmin(ctx, sess.UserID); err != nil {
+			return nil, err
+		}
+		actorID := ""
+		if actor, err := s.callerFromContext(ctx); err == nil {
+			actorID = actor.ID
+		}
+		if actorID != "" && actorID == sess.UserID {
+			audit.Logout(actorID, sess.UserID, ip)
+		} else {
+			audit.Revoke(actorID, sess.UserID, ip)
+		}
+	} else if _, err := s.callerFromContext(ctx); err != nil {
+		return nil, err
+	}
+	if s.secMetrics != nil {
+		s.secMetrics.RecordRevoked()
+	}
 	_ = s.store.DeleteSession(req.Token)
 	return &authv1.RevokeResponse{}, nil
 }
@@ -324,10 +401,11 @@ func (s *AuthServer) Can(ctx context.Context, req *authv1.CanRequest) (*authv1.C
 	user, err := s.store.GetUser(req.UserId)
 	if err == nil {
 		roles = user.Roles
-	} else {
-		// Service modules authenticate via x-caller-id (not a DB user). ExtractIdentity
-		// assigns role "module"; evaluate RBAC against that instead of deny-all.
+	} else if callerID := callerIDFromContext(ctx); callerID != "" && callerID == req.UserId {
+		// Service modules authenticate via x-caller-id (not a DB user).
 		roles = []string{"module"}
+	} else {
+		return &authv1.CanResponse{Allowed: false, Reason: "user not found"}, nil
 	}
 
 	var allowed bool
@@ -420,10 +498,18 @@ func (s *AuthServer) DisableTOTP(ctx context.Context, req *authv1.DisableTOTPReq
 	if err := s.store.DisableTOTP(req.UserId); err != nil {
 		return &authv1.DisableTOTPResponse{Error: err.Error()}, nil
 	}
+	actorID := ""
+	if actor, err := s.callerFromContext(ctx); err == nil {
+		actorID = actor.ID
+	}
+	audit.TOTPDisabled(actorID, req.UserId)
 	return &authv1.DisableTOTPResponse{}, nil
 }
 
 func (s *AuthServer) TOTPStatus(ctx context.Context, req *authv1.TOTPStatusRequest) (*authv1.TOTPStatusResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		return nil, err
+	}
 	_, enabled, err := s.store.GetTOTPSecret(req.UserId)
 	if err != nil {
 		return &authv1.TOTPStatusResponse{Enabled: false}, nil
@@ -453,6 +539,11 @@ func (s *AuthServer) VerifyTOTPSetup(ctx context.Context, req *authv1.VerifyTOTP
 	if err := s.store.VerifyTOTPSetup(req.UserId); err != nil {
 		return nil, status.Error(codes.Internal, "save verification")
 	}
+	actorID := ""
+	if actor, err := s.callerFromContext(ctx); err == nil {
+		actorID = actor.ID
+	}
+	audit.TOTPEnabled(actorID, req.UserId)
 
 	return &authv1.VerifyTOTPSetupResponse{Verified: true}, nil
 }
@@ -533,6 +624,11 @@ func (s *AuthServer) SetPassword(ctx context.Context, req *authv1.SetPasswordReq
 	if err := s.store.SetPassword(req.UserId, req.Password); err != nil {
 		return &authv1.SetPasswordResponse{Error: err.Error()}, nil
 	}
+	actorID := ""
+	if actor, err := s.callerFromContext(ctx); err == nil {
+		actorID = actor.ID
+	}
+	audit.PasswordChanged(actorID, req.UserId)
 	return &authv1.SetPasswordResponse{}, nil
 }
 
@@ -680,6 +776,10 @@ func (s *AuthServer) BeginAdminRegistration(ctx context.Context, req *authv1.Beg
 	if err := s.store.SaveWebAuthnSession(req.UserId, sessionData.Challenge, sd); err != nil {
 		return nil, status.Error(codes.Internal, "save session failed")
 	}
+	audit.WebAuthnCeremony("register_begin", "success", req.UserId, user.store.Username, sessionData.Challenge, peerIP(ctx), "")
+	if s.secMetrics != nil {
+		s.secMetrics.RecordWebAuthnCeremony()
+	}
 
 	optsJSON, _ := json.Marshal(options)
 	return &authv1.BeginAdminRegistrationResponse{
@@ -730,6 +830,10 @@ func (s *AuthServer) CompleteAdminRegistration(ctx context.Context, req *authv1.
 
 	credential, err := web.FinishRegistration(user, sessionData, httpReq)
 	if err != nil {
+		audit.WebAuthnCeremony("register_complete", "failure", req.UserId, user.store.Username, sessionData.Challenge, peerIP(ctx), "")
+		if s.secMetrics != nil {
+			s.secMetrics.RecordWebAuthnCeremony()
+		}
 		return &authv1.CompleteAdminRegistrationResponse{Error: "registration verification failed"}, nil
 	}
 
@@ -738,6 +842,10 @@ func (s *AuthServer) CompleteAdminRegistration(ctx context.Context, req *authv1.
 		return nil, status.Error(codes.Internal, "save credential failed")
 	}
 
+	audit.WebAuthnCeremony("register_complete", "success", req.UserId, user.store.Username, sessionData.Challenge, peerIP(ctx), "")
+	if s.secMetrics != nil {
+		s.secMetrics.RecordWebAuthnCeremony()
+	}
 	slog.Info("webauthn: credential registered via gRPC", "user", user.store.Username)
 	return &authv1.CompleteAdminRegistrationResponse{}, nil
 }
@@ -782,9 +890,17 @@ func (s *AuthServer) AuthorizeForTest(roles []string, action, resource string) (
 	return s.policy.IsAllowed(roles, action, resource)
 }
 
+// PolicyRoleCount returns the number of loaded RBAC roles (0 when policy is missing).
+func (s *AuthServer) PolicyRoleCount() int {
+	if s.policy == nil {
+		return 0
+	}
+	return s.policy.RoleCount()
+}
+
 func rateLimitKey(ctx context.Context, username string) string {
-	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-		return p.Addr.String()
+	if ip := peerIP(ctx); ip != "" {
+		return ip
 	}
 	if username != "" {
 		return "user:" + username
@@ -792,22 +908,13 @@ func rateLimitKey(ctx context.Context, username string) string {
 	return "unknown"
 }
 
-func (s *AuthServer) checkRateLimit(key string) bool {
-	s.rateMu.Lock()
-	defer s.rateMu.Unlock()
-	rec, exists := s.rateRecords[key]
-	if !exists {
-		rec = &loginRateRecord{}
-		s.rateRecords[key] = rec
+func peerIP(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		host, _, err := net.SplitHostPort(p.Addr.String())
+		if err != nil {
+			host = p.Addr.String()
+		}
+		return host
 	}
-	rec.lastSeen = time.Now()
-	if time.Now().Before(rec.blockedUntil) {
-		return false
-	}
-	rec.count++
-	if rec.count >= 6 {
-		rec.blockedUntil = time.Now().Add(1 * time.Minute)
-		rec.count = 0
-	}
-	return true
+	return ""
 }

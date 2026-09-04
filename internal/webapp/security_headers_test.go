@@ -68,7 +68,7 @@ func TestLoginCSRFCookieFlags(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := webapp.New(store, tc.publicURL, nil)
+			h := webapp.New(store, tc.publicURL, nil, nil, nil, nil)
 			mux := http.NewServeMux()
 			h.RegisterRoutes(mux)
 
@@ -85,8 +85,8 @@ func TestLoginCSRFCookieFlags(t *testing.T) {
 			if cookie.SameSite != http.SameSiteLaxMode {
 				t.Fatalf("SameSite=%v want Lax", cookie.SameSite)
 			}
-			if cookie.Path != "/login" {
-				t.Fatalf("Path=%q want /login", cookie.Path)
+			if cookie.Path != "/" {
+				t.Fatalf("Path=%q want /", cookie.Path)
 			}
 			if cookie.Secure != tc.wantSecure {
 				t.Fatalf("Secure=%v want %v", cookie.Secure, tc.wantSecure)
@@ -104,7 +104,7 @@ func TestLoginPageSecurityHeaders(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	h := webapp.New(store, "http://127.0.0.1:9401", nil)
+	h := webapp.New(store, "http://127.0.0.1:9401", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -161,7 +161,7 @@ func TestLoginRateLimitSecurityHeaders(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	h := webapp.New(store, "http://127.0.0.1:9401", nil)
+	h := webapp.New(store, "http://127.0.0.1:9401", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

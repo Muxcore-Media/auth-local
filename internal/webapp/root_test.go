@@ -8,7 +8,7 @@ import (
 )
 
 func TestRootHandlerRedirectsToLogin(t *testing.T) {
-	h := New(nil, "https://auth.zem.systems", nil)
+	h := New(nil, "https://auth.zem.systems", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -27,7 +27,7 @@ func TestRootHandlerRedirectsToLogin(t *testing.T) {
 func TestRootHandlerMisredirectWithCode(t *testing.T) {
 	t.Setenv("MEDIA_UI_PUBLIC_URL", "https://mux.zem.systems")
 
-	h := New(nil, "https://auth.zem.systems", nil)
+	h := New(nil, "https://auth.zem.systems", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -48,7 +48,7 @@ func TestRootHandlerMisredirectWithCode(t *testing.T) {
 }
 
 func TestRootHandlerNotFoundForOtherPaths(t *testing.T) {
-	h := New(nil, "https://auth.zem.systems", nil)
+	h := New(nil, "https://auth.zem.systems", nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
