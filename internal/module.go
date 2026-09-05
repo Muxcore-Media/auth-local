@@ -15,8 +15,9 @@ import (
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
-	"github.com/Muxcore-Media/auth-local/internal/policy"
+	"github.com/Muxcore-Media/auth-local/internal/grpctls"
 	"github.com/Muxcore-Media/auth-local/internal/server"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 	"github.com/Muxcore-Media/auth-local/internal/webapp"
@@ -248,7 +249,21 @@ func (m *Module) ReloadPolicy() error {
 }
 
 func (m *Module) Start(ctx context.Context) error {
-	m.grpcSrv = grpc.NewServer()
+	var grpcOpts []grpc.ServerOption
+	tlsCfg, err := grpctls.ServerConfig(m.dbPath)
+	if err != nil {
+		return fmt.Errorf("gRPC TLS: %w", err)
+	}
+	if tlsCfg != nil {
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		slog.Info("auth-local gRPC TLS enabled", "addr", m.grpcAddr)
+	} else {
+		slog.Warn("auth-local gRPC listening without TLS (dev only)",
+			"addr", m.grpcAddr,
+			"hint", "unset MUXCORE_INSECURE_DISABLE_TLS for production",
+		)
+	}
+	m.grpcSrv = grpc.NewServer(grpcOpts...)
 	m.authSrv.RegisterWithGRPC(m.grpcSrv)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 	go func() {

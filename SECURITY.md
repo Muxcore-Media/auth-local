@@ -26,6 +26,8 @@ lead to unauthorized system access.
 
 ### Key Security Properties
 
+- gRPC listener uses TLS by default; `MUXCORE_INSECURE_DISABLE_TLS=true` is dev-only plaintext
+- Mesh/admin identity requires verified mTLS client certificate CN; `x-caller-id` metadata alone is never trusted
 - Passwords hashed with bcrypt (cost 12)
 - Session tokens are SHA-256(random 32 bytes) → hex
 - Tokens never logged in full (prefix only in warn logs)
