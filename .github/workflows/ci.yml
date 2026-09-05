@@ -14,7 +14,9 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Checkout
-        uses: ./.github/actions/checkout-mirror
+        uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
+        with:
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
@@ -28,7 +30,9 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Checkout
-        uses: ./.github/actions/checkout-mirror
+        uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
+        with:
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
@@ -42,7 +46,9 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Checkout
-        uses: ./.github/actions/checkout-mirror
+        uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
+        with:
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
@@ -60,7 +66,9 @@ jobs:
     needs: [lint, test, build]
     steps:
       - name: Checkout
-        uses: ./.github/actions/checkout-mirror
+        uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
+        with:
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - name: Configure private modules (HTTPS)
         run: |
           git config --global url."https://x-access-token:${{ secrets.MUXCORE_CI_TOKEN }}@github.com/".insteadOf "https://github.com/"
