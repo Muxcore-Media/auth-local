@@ -184,7 +184,7 @@ func TestCan_MissingUserDenied(t *testing.T) {
 
 func TestCan_MeshCaller(t *testing.T) {
 	srv := newTestServer(t)
-	ctx := meshContext("downloader")
+	ctx := verifiedMeshContext("downloader")
 	resp, err := srv.Can(ctx, &authv1.CanRequest{
 		UserId:   "downloader",
 		Action:   "/muxcore.storage.v1.StorageService/Put",
@@ -198,9 +198,25 @@ func TestCan_MeshCaller(t *testing.T) {
 	}
 }
 
-func TestCan_MeshCallerMismatchDenied(t *testing.T) {
+func TestCan_MeshCallerMetadataOnlyDenied(t *testing.T) {
 	srv := newTestServer(t)
 	ctx := meshContext("downloader")
+	resp, err := srv.Can(ctx, &authv1.CanRequest{
+		UserId:   "downloader",
+		Action:   "/muxcore.storage.v1.StorageService/Put",
+		Resource: "*",
+	})
+	if err != nil {
+		t.Fatalf("Can: %v", err)
+	}
+	if resp.Allowed {
+		t.Fatal("expected metadata-only mesh caller to be denied without verified TLS identity")
+	}
+}
+
+func TestCan_MeshCallerMismatchDenied(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := verifiedMeshContext("downloader")
 	resp, err := srv.Can(ctx, &authv1.CanRequest{
 		UserId:   "other-module",
 		Action:   "/muxcore.storage.v1.StorageService/Put",

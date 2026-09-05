@@ -78,6 +78,22 @@ Send `SIGHUP` to reload the policy file without restarting.
 | `AUTH_RP_NAME` | `MuxCore` | WebAuthn relying party display name |
 | `AUTH_TRUSTED_PROXIES` | loopback | Comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 
+### gRPC TLS (production)
+
+By default the gRPC listener on `AUTH_GRPC_ADDR` uses TLS. Plaintext is allowed only when `MUXCORE_INSECURE_DISABLE_TLS=true` or `MUXCORE_GRPC_INSECURE=true` (local dev).
+
+| Variable | Description |
+|----------|-------------|
+| `MUXCORE_INSECURE_DISABLE_TLS` | `true` disables TLS on the gRPC listener (dev only) |
+| `MUXCORE_TLS_CERT` / `MUXCORE_TLS_KEY` | Server (and optional client) certificate paths issued by the mesh CA |
+| `MUXCORE_TLS_CA` | Mesh CA for verifying peer client certificates |
+| `AUTH_TLS_CERT` / `AUTH_TLS_KEY` / `AUTH_TLS_CA` | auth-local overrides for the above |
+| `AUTH_TLS_DIR` | Directory for auto-generated dev CA + server cert (default: alongside `AUTH_DB_PATH`) |
+
+When no certificate paths are set and TLS is required, auth-local generates an ECDSA P-256 CA and server certificate on first start (logged once). Mesh modules must present a client certificate signed by the mesh CA; mesh identity is taken from the verified certificate CN ([Module TLS Authentication](https://github.com/Muxcore-Media/core/wiki/Module-TLS-Authentication)), not from `x-caller-id` metadata alone.
+
+Session and API-token clients (e.g. `authctl` with `AUTHCTL_TOKEN`) continue to authenticate via `x-auth-token` metadata and do not need a mesh client certificate.
+
 `X-Forwarded-For` is honored only from trusted proxy peers; otherwise client IP is `RemoteAddr`. `X-Real-IP` is not used.
 
 ### Module CLI flags
