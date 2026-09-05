@@ -9,25 +9,48 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Muxcore-Media/auth-local/internal/policy"
+	"github.com/Muxcore-Media/auth-local/internal/server"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
-func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
-	dir := t.TempDir()
-	st, err := authStore.New(filepath.Join(dir, "auth.db"))
+func newInviteTestHandler(t *testing.T) (*Handler, *server.AuthServer, *authStore.Store) {
+	st, err := authStore.New(filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	srv := server.New(st, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
+	h := NewWithAuth(st, srv, "127.0.0.1:0", nil)
+	return h, srv, st
+}
 
-	h := New(st, "127.0.0.1:0", nil)
+func adminAuthHeader(t *testing.T, st *authStore.Store) string {
+	user, err := st.CreateUser("admin", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRoles(user.ID, []string{"admin"}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateFullSession(user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "Bearer " + sess.Token
+}
+
+func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
+	h, _, st := newInviteTestHandler(t)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
+	auth := adminAuthHeader(t, st)
 
 	// Create
-	body := `{"createdBy":"admin","role":"user","maxUses":1,"ttlHours":1}`
+	body := `{"role":"user","maxUses":1,"ttlHours":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/invites", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", auth)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -40,7 +63,9 @@ func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
 
 	// List
 	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/invites", nil))
+	listReq := httptest.NewRequest(http.MethodGet, "/api/invites", nil)
+	listReq.Header.Set("Authorization", auth)
+	mux.ServeHTTP(w, listReq)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), inv.Prefix) {
 		t.Fatalf("list: %d %s", w.Code, w.Body.String())
 	}
@@ -91,6 +116,7 @@ func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	req = httptest.NewRequest(http.MethodDelete, "/api/invites/"+inv3.ID, nil)
+	req.Header.Set("Authorization", auth)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -99,5 +125,49 @@ func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
 	_, _, err = st.RedeemInvite(inv3.Token, "x", "password123")
 	if err == nil {
 		t.Fatal("expected revoked redeem fail")
+	}
+}
+
+func TestInviteAPI_NonAdminCannotMint(t *testing.T) {
+	h, _, st := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	user, err := st.CreateUser("alice", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateFullSession(user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/invites", strings.NewReader(`{"role":"user","ttlHours":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sess.Token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("create status %d want 403 body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/invites", nil)
+	listReq.Header.Set("Authorization", "Bearer "+sess.Token)
+	mux.ServeHTTP(w, listReq)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list status %d want 403", w.Code)
+	}
+}
+
+func TestInviteAPI_UnauthenticatedDenied(t *testing.T) {
+	h, _, _ := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/invites", strings.NewReader(`{"role":"user"}`)))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("create status %d want 401", w.Code)
 	}
 }
