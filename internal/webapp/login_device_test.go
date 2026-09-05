@@ -2,6 +2,7 @@ package webapp_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pquerna/otp/totp"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/server"
@@ -33,7 +35,13 @@ func TestDeviceLoginTOTPFlow(t *testing.T) {
 	}
 
 	srv := server.New(store, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
-	enable, err := srv.EnableTOTP(t.Context(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	sess, err := store.CreateFullSession(user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := metadata.Pairs("x-auth-token", sess.Token)
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+	enable, err := srv.EnableTOTP(ctx, &authv1.EnableTOTPRequest{UserId: user.ID})
 	if err != nil || enable.GetError() != "" {
 		t.Fatalf("EnableTOTP: %v %+v", err, enable)
 	}

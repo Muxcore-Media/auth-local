@@ -266,11 +266,20 @@ func (m *Module) Start(ctx context.Context) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !m.authSrv.AuthenticateHTTPRequest(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = w.Write([]byte(m.authSrv.Metrics()))
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if err := m.store.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"unavailable","error":"database unreachable"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	m.httpSrv = &http.Server{Handler: mux}
@@ -338,6 +347,9 @@ func (m *Module) Stop(ctx context.Context) error {
 func (m *Module) Health(ctx context.Context) error {
 	if m.store == nil {
 		return fmt.Errorf("not initialized")
+	}
+	if err := m.store.Ping(); err != nil {
+		return fmt.Errorf("database: %w", err)
 	}
 	return nil
 }

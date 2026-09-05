@@ -85,8 +85,8 @@ func TestLoginCSRFCookieFlags(t *testing.T) {
 			if cookie.SameSite != http.SameSiteLaxMode {
 				t.Fatalf("SameSite=%v want Lax", cookie.SameSite)
 			}
-			if cookie.Path != "/login" {
-				t.Fatalf("Path=%q want /login", cookie.Path)
+			if cookie.Path != "/" {
+				t.Fatalf("Path=%q want /", cookie.Path)
 			}
 			if cookie.Secure != tc.wantSecure {
 				t.Fatalf("Secure=%v want %v", cookie.Secure, tc.wantSecure)

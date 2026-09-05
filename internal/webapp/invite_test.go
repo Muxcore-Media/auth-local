@@ -45,17 +45,28 @@ func TestInviteAPICreateRedeemExpireRevoke(t *testing.T) {
 		t.Fatalf("list: %d %s", w.Code, w.Body.String())
 	}
 
-	// Redeem page
+	// Redeem page (sets CSRF cookie)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/invite?token="+inv.Token, nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Join MuxCore") {
 		t.Fatalf("invite page: %d", w.Code)
 	}
+	var csrfCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "muxcore-auth-csrf" {
+			csrfCookie = c
+			break
+		}
+	}
+	if csrfCookie == nil || csrfCookie.Value == "" {
+		t.Fatal("missing CSRF cookie on invite page")
+	}
 
 	// Redeem
-	form := "token=" + inv.Token + "&username=newuser&password=password123"
+	form := "csrf_token=" + csrfCookie.Value + "&token=" + inv.Token + "&username=newuser&password=password123"
 	req = httptest.NewRequest(http.MethodPost, "/invite/redeem", strings.NewReader(form))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(csrfCookie)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Account created") {
