@@ -1,0 +1,25 @@
+name: Checkout (Forgejo mirror + GitHub fallback)
+description: Self-hosted checkout when runner origin is Forgejo; falls back to GitHub on mirror lag.
+inputs:
+  token:
+    description: GitHub token (MUXCORE_CI_TOKEN) for fallback fetch and mirror backfill
+    required: false
+    default: ${{ github.token }}
+  mirror-sync-first:
+    description: Wait for mirror-github-to-forgejo before checkout (slower, strict origin)
+    required: false
+    default: "0"
+  depth:
+    description: Shallow fetch depth
+    required: false
+    default: "1"
+runs:
+  using: composite
+  steps:
+    - name: Checkout via Forgejo mirror or GitHub fallback
+      shell: bash
+      env:
+        MUXCORE_CI_TOKEN: ${{ inputs.token }}
+        MIRROR_SYNC_FIRST: ${{ inputs.mirror-sync-first }}
+        CHECKOUT_DEPTH: ${{ inputs.depth }}
+      run: bash "${{ github.action_path }}/ci-checkout-self-hosted.sh"
