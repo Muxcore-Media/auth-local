@@ -228,6 +228,9 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case http.MethodGet:
+		if h.auth == nil || !h.auth.RequireAdminHTTP(w, r) {
+			return
+		}
 		list, err := h.store.ListInvites()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -238,13 +241,15 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"invites": list})
 	case http.MethodPost:
+		if h.auth == nil || !h.auth.RequireAdminHTTP(w, r) {
+			return
+		}
 		var body struct {
-			CreatedBy string `json:"createdBy"`
-			Role      string `json:"role"`
-			TenantID  string `json:"tenantId"`
-			Tenant    string `json:"tenant"`
-			MaxUses   *int   `json:"maxUses"`
-			TTLHours  int    `json:"ttlHours"`
+			Role     string `json:"role"`
+			TenantID string `json:"tenantId"`
+			Tenant   string `json:"tenant"`
+			MaxUses  *int   `json:"maxUses"`
+			TTLHours int    `json:"ttlHours"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
@@ -264,7 +269,11 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 		if tenantID == "" {
 			tenantID = strings.TrimSpace(body.Tenant)
 		}
-		inv, err := h.store.CreateInvite(body.CreatedBy, body.Role, tenantID, maxUses, time.Duration(body.TTLHours)*time.Hour)
+		createdBy := "admin"
+		if user, err := h.auth.HTTPUser(r); err == nil && user != nil {
+			createdBy = user.Username
+		}
+		inv, err := h.store.CreateInvite(createdBy, body.Role, tenantID, maxUses, time.Duration(body.TTLHours)*time.Hour)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -276,6 +285,9 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiInviteAction(w http.ResponseWriter, r *http.Request) {
+	if h.auth == nil || !h.auth.RequireAdminHTTP(w, r) {
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/invites/")
 	path = strings.Trim(path, "/")
 	if path == "" {

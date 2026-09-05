@@ -55,6 +55,7 @@ type codeEntry struct {
 
 type Handler struct {
 	store          *authStore.Store
+	auth           AdminHTTPGuard
 	publicURL      string
 	trustedProxies []net.IPNet
 	rateMu         sync.Mutex
@@ -64,12 +65,23 @@ type Handler struct {
 	stopCh         chan struct{}
 }
 
+// AdminHTTPGuard gates admin-only HTTP routes (invite management).
+type AdminHTTPGuard interface {
+	RequireAdminHTTP(w http.ResponseWriter, r *http.Request) bool
+	HTTPUser(r *http.Request) (*authStore.User, error)
+}
+
 func New(store *authStore.Store, publicURL string, trustedProxies []net.IPNet) *Handler {
+	return NewWithAuth(store, nil, publicURL, trustedProxies)
+}
+
+func NewWithAuth(store *authStore.Store, auth AdminHTTPGuard, publicURL string, trustedProxies []net.IPNet) *Handler {
 	if len(trustedProxies) == 0 {
 		trustedProxies = defaultTrustedProxies()
 	}
 	h := &Handler{
 		store:          store,
+		auth:           auth,
 		publicURL:      strings.TrimRight(strings.TrimSpace(publicURL), "/"),
 		trustedProxies: trustedProxies,
 		rateRecords:    make(map[string]*loginRateRecord),
