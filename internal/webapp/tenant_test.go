@@ -60,20 +60,15 @@ func TestLoginExchangeIncludesTenantClaim(t *testing.T) {
 }
 
 func TestInviteAPIAcceptsTenant(t *testing.T) {
-	dir := t.TempDir()
-	st, err := authStore.New(filepath.Join(dir, "auth.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	h := New(st, "127.0.0.1:0", nil)
+	h, _, st := newInviteTestHandler(t)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
+	auth := adminAuthHeader(t, st)
 
-	body := `{"createdBy":"admin","role":"user","tenantId":"hh-1","maxUses":1,"ttlHours":1}`
+	body := `{"role":"user","tenantId":"hh-1","maxUses":1,"ttlHours":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/invites", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", auth)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

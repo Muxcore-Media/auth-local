@@ -1,6 +1,15 @@
 # Changelog
 
 
+## [0.1.8] — 2026-09-05
+
+### Added
+- gRPC household invite APIs: `CreateInvite`, `ListInvites`, `RevokeInvite`, `RedeemInvite` (admin-gated create/list/revoke; public redeem).
+- HTTP `/api/invites` create/list/revoke now require an admin session (or mesh identity via gRPC).
+
+### Changed
+- Invite `created_by` is derived from the authenticated admin username, not client-supplied JSON.
+
 ## [0.1.7] — 2026-08-20
 
 ### Added
