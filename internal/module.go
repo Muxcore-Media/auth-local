@@ -178,6 +178,9 @@ func (m *Module) Init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init store: %w", err)
 	}
+	if err := authStore.BootstrapAdminFromEnv(m.store); err != nil {
+		return err
+	}
 
 	pol, err := m.loadPolicy()
 	if err != nil {
