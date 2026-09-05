@@ -395,9 +395,7 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieCSRF, _ := r.Cookie(authCSRFCookie)
-	formCSRF := r.FormValue("csrf_token")
-	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
+	if !h.validateCSRF(r) {
 		h.renderLogin(w, r, "Invalid form token — please reload and try again")
 		return
 	}
@@ -464,9 +462,7 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookieCSRF, _ := r.Cookie(authCSRFCookie)
-	formCSRF := r.FormValue("csrf_token")
-	if cookieCSRF == nil || cookieCSRF.Value == "" || formCSRF != cookieCSRF.Value {
+	if !h.validateCSRF(r) {
 		h.renderTOTP(w, r, "", "", "Invalid form token — please reload and try again")
 		return
 	}
@@ -667,11 +663,17 @@ func safeRedirect(r *url.URL, redirect string) string {
 	return "/"
 }
 
+func (h *Handler) validateCSRF(r *http.Request) bool {
+	cookieCSRF, _ := r.Cookie(authCSRFCookie)
+	formCSRF := r.FormValue("csrf_token")
+	return cookieCSRF != nil && cookieCSRF.Value != "" && formCSRF == cookieCSRF.Value
+}
+
 func (h *Handler) setCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCSRFCookie,
 		Value:    token,
-		Path:     "/login",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   h.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,

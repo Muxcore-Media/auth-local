@@ -52,6 +52,7 @@ a{color:#3db8a8}
 {{else}}
 <p>Create your account with invite role <strong>{{.Role}}</strong>.</p>
 <form method="post" action="/invite/redeem">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}"/>
 <input type="hidden" name="token" value="{{.Token}}"/>
 <label>Username</label>
 <input name="username" required autocomplete="username"/>
@@ -67,11 +68,12 @@ a{color:#3db8a8}
 var inviteTmpl = template.Must(template.New("invite").Parse(inviteHTML))
 
 type invitePageData struct {
-	Token   string
-	Role    string
-	Error   string
-	Success bool
-	Invalid bool
+	Token     string
+	Role      string
+	CSRFToken string
+	Error     string
+	Success   bool
+	Invalid   bool
 }
 
 func (h *Handler) RegisterInviteRoutes(mux *http.ServeMux) {
@@ -173,7 +175,10 @@ func (h *Handler) invitePage(w http.ResponseWriter, r *http.Request) {
 		_ = inviteTmpl.Execute(w, data)
 		return
 	}
+	csrfToken := generateCSRFToken()
+	h.setCSRFCookie(w, r, csrfToken)
 	data.Role = inv.Role
+	data.CSRFToken = csrfToken
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = inviteTmpl.Execute(w, data)
 }
@@ -184,6 +189,15 @@ func (h *Handler) inviteRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
+	if !h.validateCSRF(r) {
+		data := invitePageData{
+			Error: "Invalid form token — please reload and try again",
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = inviteTmpl.Execute(w, data)
+		return
+	}
 	token := strings.TrimSpace(r.FormValue("token"))
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
@@ -193,10 +207,14 @@ func (h *Handler) inviteRedeem(w http.ResponseWriter, r *http.Request) {
 		data.Error = err.Error()
 		if inv, peekErr := h.store.PeekInvite(token); peekErr == nil {
 			data.Role = inv.Role
+			csrfToken := generateCSRFToken()
+			h.setCSRFCookie(w, r, csrfToken)
+			data.CSRFToken = csrfToken
 		} else {
 			data.Invalid = true
 		}
 		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = inviteTmpl.Execute(w, data)
 		return
 	}

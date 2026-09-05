@@ -270,6 +270,30 @@ func TestDeleteUserSessions(t *testing.T) {
 	}
 }
 
+func TestDBFileMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secure.db")
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o want 0600", info.Mode().Perm())
+	}
+}
+
+func TestPing(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Ping(); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+}
+
 func init() {
 	// Ensure SQLite temp files go to the test temp dir.
 	_ = os.Setenv("SQLITE_TMPDIR", os.TempDir())
