@@ -247,8 +247,8 @@ func TestExtractIdentity(t *testing.T) {
 		t.Errorf("Kind = %q, want %q", resp.Kind, "user")
 	}
 
-	// Module identity requires verified mesh caller (x-caller-id metadata).
-	ctx := meshContext("downloader")
+	// Module identity requires verified mesh caller (TLS peer CN + x-caller-id metadata).
+	ctx := verifiedMeshContext("downloader")
 	resp2, err := srv.ExtractIdentity(ctx, &authv1.ExtractIdentityRequest{CallerId: "downloader"})
 	if err != nil {
 		t.Fatalf("ExtractIdentity mesh caller: %v", err)
