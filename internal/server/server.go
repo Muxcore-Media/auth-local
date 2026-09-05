@@ -341,6 +341,10 @@ func (s *AuthServer) ExtractIdentity(ctx context.Context, req *authv1.ExtractIde
 	}
 
 	if req.CallerId != "" {
+		meshCaller, ok := meshCallerFromContext(ctx)
+		if !ok || meshCaller != req.CallerId {
+			return &authv1.ExtractIdentityResponse{Found: false}, nil
+		}
 		return &authv1.ExtractIdentityResponse{
 			Found: true,
 			Id:    req.CallerId,
