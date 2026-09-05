@@ -173,7 +173,7 @@ roles:
 	t.Fatal("SIGHUP did not reload policy in time")
 }
 
-func TestMetricsRoute(t *testing.T) {
+func TestMetricsRouteRequiresAuth(t *testing.T) {
 	m := testModule(t, `
 roles:
   admin:
@@ -184,19 +184,31 @@ roles:
 		t.Fatalf("GET /metrics: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d want 401", resp.StatusCode)
+	}
+}
+
+func TestHealthRouteChecksDatabase(t *testing.T) {
+	m := testModule(t, `
+roles:
+  admin:
+    permissions: ["*"]
+`)
+	resp, err := http.Get("http://" + m.HTTPAddr() + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	s := string(body)
-	for _, want := range []string{
-		"auth_login_success_total",
-		"auth_login_failed_total",
-		"auth_sessions_active",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("metrics missing %q\n%s", want, s)
-		}
+	if !strings.Contains(string(body), `"status":"ok"`) {
+		t.Fatalf("health body = %s", body)
+	}
+	if err := m.Health(context.Background()); err != nil {
+		t.Fatalf("Module.Health: %v", err)
 	}
 }
 

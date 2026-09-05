@@ -30,7 +30,14 @@ const BuiltinYAML = `roles:
       - "media.view"
       - "media.search"
   module:
-    permissions: ["*"]
+    permissions:
+      - "*./muxcore.storage.v1.StorageService/Put"
+      - "*./muxcore.storage.v1.StorageService/Get"
+      - "*./muxcore.storage.v1.StorageService/Delete"
+      - "*./muxcore.storage.v1.StorageService/List"
+      - "*./muxcore.auth.v1.AuthService/Validate"
+      - "*./muxcore.auth.v1.AuthService/Can"
+      - "*./muxcore.auth.v1.AuthService/ExtractIdentity"
 `
 
 // Builtin returns the documented default RBAC policy.

@@ -11,7 +11,10 @@ import (
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 )
 
-const authTokenMetadataKey = "x-auth-token"
+const (
+	authTokenMetadataKey = "x-auth-token"
+	callerIDMetadataKey  = "x-caller-id"
+)
 
 func sessionTokenFromContext(ctx context.Context) string {
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -23,6 +26,19 @@ func sessionTokenFromContext(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(vals[0])
+}
+
+func meshCallerFromContext(ctx context.Context) (string, bool) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", false
+	}
+	vals := md.Get(callerIDMetadataKey)
+	if len(vals) == 0 {
+		return "", false
+	}
+	callerID := strings.TrimSpace(vals[0])
+	return callerID, callerID != ""
 }
 
 func hasRole(roles []string, want string) bool {
@@ -54,6 +70,9 @@ func (s *AuthServer) callerFromContext(ctx context.Context) (*authStore.User, er
 }
 
 func (s *AuthServer) requireAdmin(ctx context.Context) error {
+	if _, ok := meshCallerFromContext(ctx); ok {
+		return nil
+	}
 	user, err := s.callerFromContext(ctx)
 	if err != nil {
 		return err
@@ -62,6 +81,34 @@ func (s *AuthServer) requireAdmin(ctx context.Context) error {
 		return status.Error(codes.PermissionDenied, "admin role required")
 	}
 	return nil
+}
+
+func (s *AuthServer) requireAuthOrMesh(ctx context.Context) (*authStore.User, bool, error) {
+	if _, ok := meshCallerFromContext(ctx); ok {
+		return nil, true, nil
+	}
+	user, err := s.callerFromContext(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return user, false, nil
+}
+
+func (s *AuthServer) requireSelfOrAdmin(ctx context.Context, userID string) error {
+	if _, ok := meshCallerFromContext(ctx); ok {
+		return nil
+	}
+	user, err := s.callerFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	if user.ID == userID {
+		return nil
+	}
+	if hasRole(user.Roles, "admin") {
+		return nil
+	}
+	return status.Error(codes.PermissionDenied, "permission denied")
 }
 
 func (s *AuthServer) userCount() (int, error) {

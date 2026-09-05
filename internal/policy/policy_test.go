@@ -14,6 +14,9 @@ func TestBuiltin(t *testing.T) {
 	if allowed, _ := p.IsAllowed([]string{"module"}, "/muxcore.storage.v1.StorageService/Put", "*"); !allowed {
 		t.Error("module role should allow storage Put")
 	}
+	if allowed, _ := p.IsAllowed([]string{"module"}, "delete", "media"); allowed {
+		t.Error("module role should not allow arbitrary media delete")
+	}
 	if allowed, _ := p.IsAllowed([]string{"admin"}, "x", "y"); !allowed {
 		t.Error("admin should be allowed")
 	}

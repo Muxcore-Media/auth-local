@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pquerna/otp/totp"
+	"google.golang.org/grpc/metadata"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
@@ -23,6 +24,21 @@ func newTestServer(t *testing.T) *AuthServer {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return New(s, policy.Builtin(), "localhost", []string{"http://localhost"}, "test")
+}
+
+func authContext(t *testing.T, srv *AuthServer, userID string) context.Context {
+	t.Helper()
+	sess, err := srv.store.CreateFullSession(userID)
+	if err != nil {
+		t.Fatalf("CreateFullSession: %v", err)
+	}
+	md := metadata.Pairs(authTokenMetadataKey, sess.Token)
+	return metadata.NewIncomingContext(context.Background(), md)
+}
+
+func meshContext(callerID string) context.Context {
+	md := metadata.Pairs(callerIDMetadataKey, callerID)
+	return metadata.NewIncomingContext(context.Background(), md)
 }
 
 func TestAuthenticate_Password(t *testing.T) {
@@ -103,10 +119,22 @@ func TestRevoke(t *testing.T) {
 	user, _ := srv.store.GetUserByUsername("alice")
 	sess, _ := srv.store.CreateFullSession(user.ID)
 
-	_, _ = srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
+	_, _ = srv.Revoke(authContext(t, srv, user.ID), &authv1.RevokeRequest{Token: sess.Token})
 	resp, _ := srv.Validate(context.Background(), &authv1.ValidateRequest{Token: sess.Token})
 	if resp.Valid {
 		t.Fatal("expected session to be revoked")
+	}
+}
+
+func TestRevoke_Unauthenticated(t *testing.T) {
+	srv := newTestServer(t)
+	_, _ = srv.store.CreateUser("alice", "pw")
+	user, _ := srv.store.GetUserByUsername("alice")
+	sess, _ := srv.store.CreateFullSession(user.ID)
+
+	_, err := srv.Revoke(context.Background(), &authv1.RevokeRequest{Token: sess.Token})
+	if err == nil {
+		t.Fatal("expected unauthenticated revoke to fail")
 	}
 }
 
@@ -136,6 +164,53 @@ func TestCan(t *testing.T) {
 	})
 	if resp2.Allowed {
 		t.Fatal("expected viewer to be denied delete")
+	}
+}
+
+func TestCan_MissingUserDenied(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.Can(context.Background(), &authv1.CanRequest{
+		UserId:   "nonexistent-module",
+		Action:   "delete",
+		Resource: "media",
+	})
+	if err != nil {
+		t.Fatalf("Can: %v", err)
+	}
+	if resp.Allowed {
+		t.Fatal("expected missing user without mesh identity to be denied")
+	}
+}
+
+func TestCan_MeshCaller(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := meshContext("downloader")
+	resp, err := srv.Can(ctx, &authv1.CanRequest{
+		UserId:   "downloader",
+		Action:   "/muxcore.storage.v1.StorageService/Put",
+		Resource: "*",
+	})
+	if err != nil {
+		t.Fatalf("Can: %v", err)
+	}
+	if !resp.Allowed {
+		t.Fatalf("expected mesh caller allowed: %s", resp.Reason)
+	}
+}
+
+func TestCan_MeshCallerMismatchDenied(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := meshContext("downloader")
+	resp, err := srv.Can(ctx, &authv1.CanRequest{
+		UserId:   "other-module",
+		Action:   "/muxcore.storage.v1.StorageService/Put",
+		Resource: "*",
+	})
+	if err != nil {
+		t.Fatalf("Can: %v", err)
+	}
+	if resp.Allowed {
+		t.Fatal("expected mismatched mesh caller id to be denied")
 	}
 }
 
@@ -180,7 +255,7 @@ func TestEnableTOTP(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
 
-	resp, err := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	resp, err := srv.EnableTOTP(authContext(t, srv, user.ID), &authv1.EnableTOTPRequest{UserId: user.ID})
 	if err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}
@@ -192,7 +267,7 @@ func TestEnableTOTP(t *testing.T) {
 	}
 
 	// Verify TOTP is now enabled.
-	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	status, _ := srv.TOTPStatus(authContext(t, srv, user.ID), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if !status.Enabled {
 		t.Fatal("expected TOTP to be enabled")
 	}
@@ -202,7 +277,7 @@ func TestTOTP_LoginFlow(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
 
-	enableResp, _ := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	enableResp, _ := srv.EnableTOTP(authContext(t, srv, user.ID), &authv1.EnableTOTPRequest{UserId: user.ID})
 	secret := enableResp.Secret
 
 	// Login with password — should get partial token (TOTP requires 2FA).
@@ -255,7 +330,7 @@ func TestTOTP_LoginFlow(t *testing.T) {
 func TestTOTP_InvalidCode(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
-	enableResp, _ := srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	enableResp, _ := srv.EnableTOTP(authContext(t, srv, user.ID), &authv1.EnableTOTPRequest{UserId: user.ID})
 	_ = enableResp
 
 	// Login to get partial token.
@@ -285,16 +360,16 @@ func TestTOTP_InvalidCode(t *testing.T) {
 func TestDisableTOTP(t *testing.T) {
 	srv := newTestServer(t)
 	user, _ := srv.store.CreateUser("alice", "pw")
-	_, _ = srv.EnableTOTP(context.Background(), &authv1.EnableTOTPRequest{UserId: user.ID})
+	_, _ = srv.EnableTOTP(authContext(t, srv, user.ID), &authv1.EnableTOTPRequest{UserId: user.ID})
 
-	status, _ := srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	status, _ := srv.TOTPStatus(authContext(t, srv, user.ID), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if !status.Enabled {
 		t.Fatal("expected TOTP enabled before disable")
 	}
 
-	_, _ = srv.DisableTOTP(context.Background(), &authv1.DisableTOTPRequest{UserId: user.ID})
+	_, _ = srv.DisableTOTP(authContext(t, srv, user.ID), &authv1.DisableTOTPRequest{UserId: user.ID})
 
-	status, _ = srv.TOTPStatus(context.Background(), &authv1.TOTPStatusRequest{UserId: user.ID})
+	status, _ = srv.TOTPStatus(authContext(t, srv, user.ID), &authv1.TOTPStatusRequest{UserId: user.ID})
 	if status.Enabled {
 		t.Fatal("expected TOTP disabled after disable")
 	}

@@ -282,6 +282,19 @@ func (s *AuthServer) Validate(ctx context.Context, req *authv1.ValidateRequest) 
 }
 
 func (s *AuthServer) Revoke(ctx context.Context, req *authv1.RevokeRequest) (*authv1.RevokeResponse, error) {
+	caller, isMesh, err := s.requireAuthOrMesh(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !isMesh {
+		sess, sessErr := s.store.GetSession(req.Token)
+		if sessErr != nil {
+			return nil, status.Error(codes.NotFound, "session not found")
+		}
+		if !hasRole(caller.Roles, "admin") && sess.UserID != caller.ID {
+			return nil, status.Error(codes.PermissionDenied, "permission denied")
+		}
+	}
 	_ = s.store.DeleteSession(req.Token)
 	return &authv1.RevokeResponse{}, nil
 }
@@ -291,9 +304,8 @@ func (s *AuthServer) Can(ctx context.Context, req *authv1.CanRequest) (*authv1.C
 	user, err := s.store.GetUser(req.UserId)
 	if err == nil {
 		roles = user.Roles
-	} else {
-		// Service modules authenticate via x-caller-id (not a DB user). ExtractIdentity
-		// assigns role "module"; evaluate RBAC against that instead of deny-all.
+	} else if callerID, ok := meshCallerFromContext(ctx); ok && callerID == req.UserId {
+		// Service modules authenticate via x-caller-id (not a DB user).
 		roles = []string{"module"}
 	}
 
@@ -343,6 +355,12 @@ func (s *AuthServer) ExtractIdentity(ctx context.Context, req *authv1.ExtractIde
 // --- TOTP Management ---
 
 func (s *AuthServer) EnableTOTP(ctx context.Context, req *authv1.EnableTOTPRequest) (*authv1.EnableTOTPResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.EnableTOTPResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	user, err := s.store.GetUser(req.UserId)
 	if err != nil {
 		return &authv1.EnableTOTPResponse{Error: "user not found"}, nil
@@ -372,6 +390,12 @@ func (s *AuthServer) EnableTOTP(ctx context.Context, req *authv1.EnableTOTPReque
 }
 
 func (s *AuthServer) DisableTOTP(ctx context.Context, req *authv1.DisableTOTPRequest) (*authv1.DisableTOTPResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DisableTOTPResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DisableTOTP(req.UserId); err != nil {
 		return &authv1.DisableTOTPResponse{Error: err.Error()}, nil
 	}
@@ -379,6 +403,9 @@ func (s *AuthServer) DisableTOTP(ctx context.Context, req *authv1.DisableTOTPReq
 }
 
 func (s *AuthServer) TOTPStatus(ctx context.Context, req *authv1.TOTPStatusRequest) (*authv1.TOTPStatusResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		return nil, err
+	}
 	_, enabled, err := s.store.GetTOTPSecret(req.UserId)
 	if err != nil {
 		return &authv1.TOTPStatusResponse{Enabled: false}, nil
@@ -387,6 +414,12 @@ func (s *AuthServer) TOTPStatus(ctx context.Context, req *authv1.TOTPStatusReque
 }
 
 func (s *AuthServer) VerifyTOTPSetup(ctx context.Context, req *authv1.VerifyTOTPSetupRequest) (*authv1.VerifyTOTPSetupResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.VerifyTOTPSetupResponse{Verified: false, Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	secret, enabled, err := s.store.GetTOTPSecret(req.UserId)
 	if err != nil || !enabled {
 		return &authv1.VerifyTOTPSetupResponse{Verified: false, Error: "TOTP not enabled for this user"}, nil
@@ -495,6 +528,12 @@ func (s *AuthServer) CreateAPIToken(ctx context.Context, req *authv1.CreateAPITo
 	if req.UserId == "" || req.Name == "" {
 		return &authv1.CreateAPITokenResponse{Error: "user_id and name are required"}, nil
 	}
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.CreateAPITokenResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	token, info, err := s.store.CreateAPIToken(req.UserId, req.Name, req.Scopes)
 	if err != nil {
 		return &authv1.CreateAPITokenResponse{Error: err.Error()}, nil
@@ -506,6 +545,9 @@ func (s *AuthServer) CreateAPIToken(ctx context.Context, req *authv1.CreateAPITo
 }
 
 func (s *AuthServer) ListAPITokens(ctx context.Context, req *authv1.ListAPITokensRequest) (*authv1.ListAPITokensResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		return nil, err
+	}
 	tokens, err := s.store.ListAPITokens(req.UserId)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -524,6 +566,16 @@ func (s *AuthServer) ListAPITokens(ctx context.Context, req *authv1.ListAPIToken
 }
 
 func (s *AuthServer) DeleteAPIToken(ctx context.Context, req *authv1.DeleteAPITokenRequest) (*authv1.DeleteAPITokenResponse, error) {
+	ownerID, err := s.store.APITokenUserID(req.TokenId)
+	if err != nil {
+		return &authv1.DeleteAPITokenResponse{Error: "token not found"}, nil
+	}
+	if err := s.requireSelfOrAdmin(ctx, ownerID); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DeleteAPITokenResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DeleteAPIToken(req.TokenId); err != nil {
 		return &authv1.DeleteAPITokenResponse{Error: err.Error()}, nil
 	}
@@ -533,6 +585,12 @@ func (s *AuthServer) DeleteAPIToken(ctx context.Context, req *authv1.DeleteAPITo
 // --- WebAuthn Credential Management ---
 
 func (s *AuthServer) ListWebAuthnCredentials(ctx context.Context, req *authv1.ListWebAuthnCredentialsRequest) (*authv1.ListWebAuthnCredentialsResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.ListWebAuthnCredentialsResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	infos, err := s.store.ListWebAuthnCredentialMeta(req.UserId)
 	if err != nil {
 		return &authv1.ListWebAuthnCredentialsResponse{Error: "list failed"}, nil
@@ -552,6 +610,12 @@ func (s *AuthServer) ListWebAuthnCredentials(ctx context.Context, req *authv1.Li
 }
 
 func (s *AuthServer) DeleteWebAuthnCredential(ctx context.Context, req *authv1.DeleteWebAuthnCredentialRequest) (*authv1.DeleteWebAuthnCredentialResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.DeleteWebAuthnCredentialResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	if err := s.store.DeleteWebAuthnCredential(req.UserId, req.CredentialId); err != nil {
 		return &authv1.DeleteWebAuthnCredentialResponse{Error: "delete failed"}, nil
 	}
@@ -559,6 +623,12 @@ func (s *AuthServer) DeleteWebAuthnCredential(ctx context.Context, req *authv1.D
 }
 
 func (s *AuthServer) BeginAdminRegistration(ctx context.Context, req *authv1.BeginAdminRegistrationRequest) (*authv1.BeginAdminRegistrationResponse, error) {
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.BeginAdminRegistrationResponse{Error: st.Message()}, nil
+		}
+		return nil, err
+	}
 	// Load user with WebAuthn credentials
 	user, err := s.loadWebAuthnUser(req.UserId)
 	if err != nil {
@@ -599,6 +669,12 @@ func (s *AuthServer) CompleteAdminRegistration(ctx context.Context, req *authv1.
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(sd, &sessionData); err != nil {
 		return &authv1.CompleteAdminRegistrationResponse{Error: "invalid session data"}, nil
+	}
+	if err := s.requireSelfOrAdmin(ctx, req.UserId); err != nil {
+		if st, ok := status.FromError(err); ok {
+			return &authv1.CompleteAdminRegistrationResponse{Error: st.Message()}, nil
+		}
+		return nil, err
 	}
 	_ = s.store.DeleteWebAuthnSession(sessionData.Challenge)
 

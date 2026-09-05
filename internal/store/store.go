@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,9 @@ func New(path string) (*Store, error) {
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("chmod db: %w", err)
 	}
 	return s, nil
 }
@@ -399,6 +403,16 @@ func (s *Store) DeleteAPIToken(id string) error {
 	return err
 }
 
+// APITokenUserID returns the owning user ID for an API token.
+func (s *Store) APITokenUserID(id string) (string, error) {
+	var userID string
+	err := s.db.QueryRow(`SELECT user_id FROM api_tokens WHERE id = ?`, id).Scan(&userID)
+	if err != nil {
+		return "", err
+	}
+	return userID, nil
+}
+
 // --- Password Authentication ---
 
 func (s *Store) VerifyPassword(username, password string) (*User, error) {
@@ -629,6 +643,11 @@ func (s *Store) DeleteWebAuthnCredential(userID, credentialID string) error {
 func (s *Store) DeleteAllWebAuthnCredentials(userID string) error {
 	_, err := s.db.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, userID)
 	return err
+}
+
+// Ping checks database connectivity.
+func (s *Store) Ping() error {
+	return s.db.Ping()
 }
 
 // SessionCount returns the number of active (non-expired) sessions.
