@@ -305,7 +305,7 @@ func (s *AuthServer) Can(ctx context.Context, req *authv1.CanRequest) (*authv1.C
 	if err == nil {
 		roles = user.Roles
 	} else if callerID, ok := meshCallerFromContext(ctx); ok && callerID == req.UserId {
-		// Service modules authenticate via x-caller-id (not a DB user).
+		// Service modules authenticate via verified mTLS client cert CN (not metadata alone).
 		roles = []string{"module"}
 	}
 

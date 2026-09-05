@@ -9,9 +9,10 @@ import (
 	"strings"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
+
+	"github.com/Muxcore-Media/auth-local/internal/grpctls"
 )
 
 func main() {
@@ -43,7 +44,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts, err := grpctls.ClientDialOptions()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "TLS config: %v\n", err)
+		os.Exit(1)
+	}
+	conn, err := grpc.NewClient(*addr, dialOpts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "connect: %v\n", err)
 		os.Exit(1)

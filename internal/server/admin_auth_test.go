@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"google.golang.org/grpc/metadata"
+
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 )
 
@@ -61,15 +63,40 @@ func TestDeleteUser_RequiresAdmin(t *testing.T) {
 	}
 }
 
-func TestRequireAdmin_AllowsMeshCaller(t *testing.T) {
+func TestRequireAdmin_RejectsSpoofedMeshMetadata(t *testing.T) {
 	srv := newTestServer(t)
 	_, _ = srv.store.CreateUser("alice", "pw")
 
-	resp, err := srv.ListUsers(meshContext("muxcore"), &authv1.ListUsersRequest{})
+	_, err := srv.ListUsers(meshContext("muxcore"), &authv1.ListUsersRequest{})
+	if err == nil {
+		t.Fatal("expected spoofed x-caller-id without TLS peer cert to be rejected")
+	}
+}
+
+func TestRequireAdmin_AllowsVerifiedMeshCaller(t *testing.T) {
+	srv := newTestServer(t)
+	_, _ = srv.store.CreateUser("alice", "pw")
+
+	resp, err := srv.ListUsers(verifiedMeshContext("muxcore"), &authv1.ListUsersRequest{})
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
 	if len(resp.Users) == 0 {
-		t.Fatal("expected mesh caller to list users")
+		t.Fatal("expected verified mesh caller to list users")
+	}
+}
+
+func TestRequireAdmin_RejectsMismatchedMeshMetadata(t *testing.T) {
+	srv := newTestServer(t)
+	_, _ = srv.store.CreateUser("alice", "pw")
+
+	ctx := verifiedMeshContext("muxcore")
+	md, _ := metadata.FromIncomingContext(ctx)
+	md.Set(callerIDMetadataKey, "downloader")
+	ctx = metadata.NewIncomingContext(ctx, md)
+
+	_, err := srv.ListUsers(ctx, &authv1.ListUsersRequest{})
+	if err == nil {
+		t.Fatal("expected mismatched x-caller-id vs TLS CN to be rejected")
 	}
 }

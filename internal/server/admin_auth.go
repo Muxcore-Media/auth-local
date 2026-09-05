@@ -28,19 +28,6 @@ func sessionTokenFromContext(ctx context.Context) string {
 	return strings.TrimSpace(vals[0])
 }
 
-func meshCallerFromContext(ctx context.Context) (string, bool) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return "", false
-	}
-	vals := md.Get(callerIDMetadataKey)
-	if len(vals) == 0 {
-		return "", false
-	}
-	callerID := strings.TrimSpace(vals[0])
-	return callerID, callerID != ""
-}
-
 func hasRole(roles []string, want string) bool {
 	for _, r := range roles {
 		if r == want {
