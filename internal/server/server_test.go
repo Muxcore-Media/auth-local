@@ -247,10 +247,40 @@ func TestExtractIdentity(t *testing.T) {
 		t.Errorf("Kind = %q, want %q", resp.Kind, "user")
 	}
 
-	// Module identity.
-	resp2, _ := srv.ExtractIdentity(context.Background(), &authv1.ExtractIdentityRequest{CallerId: "downloader"})
+	// Module identity requires verified mesh caller (x-caller-id metadata).
+	ctx := meshContext("downloader")
+	resp2, err := srv.ExtractIdentity(ctx, &authv1.ExtractIdentityRequest{CallerId: "downloader"})
+	if err != nil {
+		t.Fatalf("ExtractIdentity mesh caller: %v", err)
+	}
 	if !resp2.Found {
-		t.Fatal("expected module identity found")
+		t.Fatal("expected module identity found for verified mesh caller")
+	}
+	if resp2.Kind != "service" {
+		t.Errorf("Kind = %q, want %q", resp2.Kind, "service")
+	}
+}
+
+func TestExtractIdentity_UnauthenticatedCallerIdRejected(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.ExtractIdentity(context.Background(), &authv1.ExtractIdentityRequest{CallerId: "downloader"})
+	if err != nil {
+		t.Fatalf("ExtractIdentity: %v", err)
+	}
+	if resp.Found {
+		t.Fatal("expected unauthenticated CallerId to be rejected")
+	}
+}
+
+func TestExtractIdentity_MeshCallerMismatchRejected(t *testing.T) {
+	srv := newTestServer(t)
+	ctx := meshContext("downloader")
+	resp, err := srv.ExtractIdentity(ctx, &authv1.ExtractIdentityRequest{CallerId: "other-module"})
+	if err != nil {
+		t.Fatalf("ExtractIdentity: %v", err)
+	}
+	if resp.Found {
+		t.Fatal("expected mismatched CallerId to be rejected")
 	}
 }
 
