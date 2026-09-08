@@ -113,6 +113,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/login/device/totp", secure(h.deviceTOTPLogin))
 	mux.HandleFunc("/", secure(h.rootHandler))
 	h.RegisterInviteRoutes(mux)
+	h.RegisterUserRoutes(mux)
+	h.RegisterTokenRoutes(mux)
+	h.RegisterTOTPRoutes(mux)
 }
 
 func (h *Handler) rootHandler(w http.ResponseWriter, r *http.Request) {

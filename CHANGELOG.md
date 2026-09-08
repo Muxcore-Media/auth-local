@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.14] — 2026-09-08
+
+### Changed
+- HTTP passkey list/delete (`GET /api/webauthn/credentials`, `DELETE /api/webauthn/credentials/{id}`) now require a full session. `user_id` defaults to the caller; another user's credentials require admin.
+
+## [0.1.13] — 2026-09-08
+
+### Added
+- HTTP household TOTP: `GET|POST|DELETE /api/totp` and `POST /api/totp/verify`. Any signed-in user manages their own authenticator. Enable returns the base32 secret and `otpauth://` URL; verify accepts `{ code }` or `{ totp_code }`.
+
+## [0.1.12] — 2026-09-08
+
+### Added
+- HTTP household user create: `POST /api/users` `{ username, password, role? }`. Admin session required. Minimum 8-character password. Optional role defaults to `user`. Tenant is taken from the admin session when the body omits it.
+
+## [0.1.11] — 2026-09-08
+
+### Added
+- HTTP household password set: `POST /api/users/{id}/password` `{ password }`. Admin session required. Minimum 8 characters. Used by the household BFF password-reset queue.
+
+## [0.1.10] — 2026-09-08
+
+### Added
+- HTTP household API keys: `GET|POST /api/tokens`, `DELETE /api/tokens/{id}`, `POST /api/tokens/{id}/rotate`. Admin session required. Raw secret is returned once on create/rotate and never listed.
+
+## [0.1.9] — 2026-09-08
+
+### Added
+- HTTP household user admin: `GET /api/users`, `PATCH /api/users/{id}` (roles), `DELETE /api/users/{id}`. Admin session required. Blocks self-delete and last-admin delete/demote.
 
 ## [0.1.8] — 2026-09-05
 
