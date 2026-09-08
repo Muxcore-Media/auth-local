@@ -1,0 +1,116 @@
+package webapp
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestUsersAPIListRequiresAdmin(t *testing.T) {
+	h, _, _ := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/users", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d", w.Code)
+	}
+}
+
+func TestUsersAPIListAndRoleAndDelete(t *testing.T) {
+	h, _, st := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	auth := adminAuthHeader(t, st)
+
+	member, err := st.CreateUser("pat", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRoles(member.ID, []string{"user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(`{"username":"sam","password":"password123","role":"viewer"}`))
+	createReq.Header.Set("Authorization", auth)
+	createW := httptest.NewRecorder()
+	mux.ServeHTTP(createW, createReq)
+	if createW.Code != http.StatusCreated {
+		t.Fatalf("create %d %s", createW.Code, createW.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	listReq.Header.Set("Authorization", auth)
+	listW := httptest.NewRecorder()
+	mux.ServeHTTP(listW, listReq)
+	if listW.Code != http.StatusOK {
+		t.Fatalf("list %d %s", listW.Code, listW.Body.String())
+	}
+	var listed struct {
+		Users []struct {
+			ID       string   `json:"id"`
+			Username string   `json:"username"`
+			Roles    []string `json:"roles"`
+		} `json:"users"`
+	}
+	if err := json.NewDecoder(listW.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Users) < 2 {
+		t.Fatalf("%#v", listed)
+	}
+
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/users/"+member.ID, strings.NewReader(`{"role":"viewer"}`))
+	patchReq.Header.Set("Authorization", auth)
+	patchW := httptest.NewRecorder()
+	mux.ServeHTTP(patchW, patchReq)
+	if patchW.Code != http.StatusOK {
+		t.Fatalf("patch %d %s", patchW.Code, patchW.Body.String())
+	}
+
+	pwReq := httptest.NewRequest(http.MethodPost, "/api/users/"+member.ID+"/password", strings.NewReader(`{"password":"newpass99"}`))
+	pwReq.Header.Set("Authorization", auth)
+	pwW := httptest.NewRecorder()
+	mux.ServeHTTP(pwW, pwReq)
+	if pwW.Code != http.StatusOK {
+		t.Fatalf("password %d %s", pwW.Code, pwW.Body.String())
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/users/"+member.ID, nil)
+	delReq.Header.Set("Authorization", auth)
+	delW := httptest.NewRecorder()
+	mux.ServeHTTP(delW, delReq)
+	if delW.Code != http.StatusOK {
+		t.Fatalf("delete %d %s", delW.Code, delW.Body.String())
+	}
+}
+
+func TestUsersAPIRejectsSelfDeleteAndLastAdmin(t *testing.T) {
+	h, _, st := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	auth := adminAuthHeader(t, st)
+	users, err := st.ListUsers()
+	if err != nil || len(users) != 1 {
+		t.Fatalf("users=%v err=%v", users, err)
+	}
+	adminID := users[0].ID
+
+	selfReq := httptest.NewRequest(http.MethodDelete, "/api/users/"+adminID, nil)
+	selfReq.Header.Set("Authorization", auth)
+	selfW := httptest.NewRecorder()
+	mux.ServeHTTP(selfW, selfReq)
+	if selfW.Code != http.StatusBadRequest {
+		t.Fatalf("self-delete %d %s", selfW.Code, selfW.Body.String())
+	}
+
+	demote := httptest.NewRequest(http.MethodPatch, "/api/users/"+adminID, strings.NewReader(`{"role":"user"}`))
+	demote.Header.Set("Authorization", auth)
+	demoteW := httptest.NewRecorder()
+	mux.ServeHTTP(demoteW, demote)
+	if demoteW.Code != http.StatusBadRequest {
+		t.Fatalf("demote %d %s", demoteW.Code, demoteW.Body.String())
+	}
+}
