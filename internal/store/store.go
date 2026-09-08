@@ -321,6 +321,7 @@ type APITokenInfo struct {
 	Prefix    string    `json:"prefix"`
 	Scopes    []string  `json:"scopes"`
 	CreatedAt time.Time `json:"created_at"`
+	LastUsed  time.Time `json:"last_used"`
 }
 
 func (s *Store) CreateAPIToken(userID, name string, scopes []string) (string, *APITokenInfo, error) {
@@ -374,7 +375,7 @@ func (s *Store) ValidateAPIToken(rawToken string) (*Session, error) {
 
 func (s *Store) ListAPITokens(userID string) ([]*APITokenInfo, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, prefix, scopes, created_at FROM api_tokens WHERE user_id = ? ORDER BY created_at`,
+		`SELECT id, name, prefix, scopes, created_at, COALESCE(last_used, '') FROM api_tokens WHERE user_id = ? ORDER BY created_at`,
 		userID,
 	)
 	if err != nil {
@@ -385,14 +386,15 @@ func (s *Store) ListAPITokens(userID string) ([]*APITokenInfo, error) {
 	var tokens []*APITokenInfo
 	for rows.Next() {
 		t := &APITokenInfo{}
-		var scopesJSON, createdAtStr string
-		if err := rows.Scan(&t.ID, &t.Name, &t.Prefix, &scopesJSON, &createdAtStr); err != nil {
+		var scopesJSON, createdAtStr, lastUsedStr string
+		if err := rows.Scan(&t.ID, &t.Name, &t.Prefix, &scopesJSON, &createdAtStr, &lastUsedStr); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(scopesJSON), &t.Scopes); err != nil {
 			slog.Warn("corrupt scopes data for API token", "token_id", t.ID, "error", err)
 		}
 		t.CreatedAt = parseTime(createdAtStr)
+		t.LastUsed = parseTime(lastUsedStr)
 		tokens = append(tokens, t)
 	}
 	return tokens, nil

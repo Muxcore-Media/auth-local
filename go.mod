@@ -1,6 +1,6 @@
 module github.com/Muxcore-Media/auth-local
 
-go 1.26.4
+go 1.26.6
 
 require (
 	github.com/Muxcore-Media/core v0.5.9

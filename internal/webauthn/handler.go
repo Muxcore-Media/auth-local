@@ -296,14 +296,39 @@ func mustAuth(w http.ResponseWriter, r *http.Request, store *authStore.Store) *a
 	return sess
 }
 
+func credentialUserID(w http.ResponseWriter, r *http.Request, store *authStore.Store) (string, bool) {
+	sess := mustAuth(w, r, store)
+	if sess == nil {
+		return "", false
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if userID == "" {
+		return sess.UserID, true
+	}
+	if userID == sess.UserID {
+		return userID, true
+	}
+	caller, err := store.GetUser(sess.UserID)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return "", false
+	}
+	for _, role := range caller.Roles {
+		if strings.EqualFold(strings.TrimSpace(role), "admin") {
+			return userID, true
+		}
+	}
+	writeError(w, http.StatusForbidden, "admin role required")
+	return "", false
+}
+
 func (h *Handler) listCredentials(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "GET required")
 		return
 	}
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		writeError(w, http.StatusBadRequest, "user_id required")
+	userID, ok := credentialUserID(w, r, h.store)
+	if !ok {
 		return
 	}
 
@@ -334,9 +359,8 @@ func (h *Handler) deleteCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		writeError(w, http.StatusBadRequest, "user_id required")
+	userID, ok := credentialUserID(w, r, h.store)
+	if !ok {
 		return
 	}
 
