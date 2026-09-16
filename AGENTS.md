@@ -17,6 +17,7 @@ MuxCore sidecar module (`auth-local`). Workspace deploy and SSH: [`../AGENTS.md`
 - Match existing Go patterns; run `gofmt` and package tests before finishing.
 - Cross-module events: prefer `github.com/Muxcore-Media/contracts-media/events` over deprecated `core/pkg/contracts` aliases.
 - Do not edit polluted workspace dumps (see `MASTER-ROADMAP.md` Appendix H).
+- Roadmaps, task lists, and remaining-work checklists live in workspace [`MASTER-ROADMAP.md`](../MASTER-ROADMAP.md) and umbrella GitHub Issues. Do not add `ROADMAP.md` / `TASKS.md` in this repo.
 
 ## Build
 
