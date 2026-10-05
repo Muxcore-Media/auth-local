@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.15] - 2026-10-05
+
+
+### Added
+- Upgrade test (ADR-0015, NFR-DATA-002): `internal/store/upgrade_test.go` opens a committed snapshot produced by tag v0.1.5 (`internal/store/testdata/upgrade/`) with the current code twice and checks schema superset, seeded rows, new-column defaults, and integrity. No migration bugs found.
+
+### Changed
+- Requires `core/sdk/go/module` v0.6.1 (for `moduletest`); this raises `modernc.org/sqlite` to v1.55.0.
+
 ## [0.1.14] - 2026-10-05
 
 ### Changed

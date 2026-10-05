@@ -1,0 +1,65 @@
+//go:build upgradeseed
+
+package store
+
+import (
+	"os"
+	"testing"
+)
+
+// TestUpgradeSeed seeds a database at $UPGRADE_SEED_DB using this tag's store.
+func TestUpgradeSeed(t *testing.T) {
+	path := os.Getenv("UPGRADE_SEED_DB")
+	if path == "" {
+		t.Skip("UPGRADE_SEED_DB not set")
+	}
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Users: alice (admin, TOTP via users columns), bob (plain), carol (totp table).
+	alice, err := s.CreateUser("alice", "alice-password-1")
+	must(t, err)
+	must(t, s.SetRoles(alice.ID, []string{"admin", "user"}))
+	bob, err := s.CreateUser("bob", "bob-password-2")
+	must(t, err)
+	carol, err := s.CreateUser("carol", "carol-password-3")
+	must(t, err)
+	// users.totp_* legacy columns for alice.
+	_, err = s.db.Exec(`UPDATE users SET totp_secret='JBSWY3DPEHPK3PXP', totp_enabled=1 WHERE id=?`, alice.ID)
+	must(t, err)
+
+	// Sessions (full, partial) - far-future expiry so they read back.
+	for _, c := range []struct{ id, kind string }{{alice.ID, "full"}, {bob.ID, "partial"}} {
+		_, err = s.db.Exec(`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, '2099-01-01T00:00:00Z')`,
+			"seed-session-"+c.kind, c.id, c.kind)
+		must(t, err)
+	}
+
+	// API tokens (hash of a known raw token for alice).
+	_, err = s.db.Exec(`INSERT INTO api_tokens (id, user_id, name, token_hash, prefix, scopes) VALUES
+		('tok-1', ?, 'ci-token', ?, 'mct_seedtok1', '["read","write"]'),
+		('tok-2', ?, 'readonly', 'deadbeef', 'mct_seedtok2', '["read"]')`,
+		alice.ID, sha256Hex("mct_seedtoken_alice_0000000000000000"), bob.ID)
+	must(t, err)
+
+	// TOTP table (carol).
+	must(t, s.SetTOTPSecret(carol.ID, "KRSXG5CTMVRXEZLU"))
+	must(t, s.VerifyTOTPSetup(carol.ID))
+
+	// WebAuthn credentials + sessions.
+	must(t, s.AddWebAuthnCredential(alice.ID, []byte("seed-passkey-alice-1")))
+	must(t, s.AddWebAuthnCredential(alice.ID, []byte("seed-passkey-alice-2")))
+	must(t, s.AddWebAuthnCredential(bob.ID, []byte("seed-passkey-bob-1")))
+	_, err = s.db.Exec(`INSERT INTO webauthn_sessions (challenge, user_id, data, expires_at) VALUES ('seed-challenge', ?, x'01020304', '2099-01-01 00:00:00')`, alice.ID)
+	must(t, err)
+
+	must(t, s.Close())
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
