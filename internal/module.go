@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/Muxcore-Media/auth-local/internal/grpctls"
+	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/server"
 	authStore "github.com/Muxcore-Media/auth-local/internal/store"
 	"github.com/Muxcore-Media/auth-local/internal/webapp"
