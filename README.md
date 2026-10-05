@@ -72,6 +72,8 @@ Send `SIGHUP` to reload the policy file without restarting.
 | `AUTH_GRPC_ADDR` | `:9403` | gRPC listen address |
 | `AUTH_HTTP_ADDR` | `:9401` | HTTP listen address (login UI, metrics, WebAuthn) |
 | `AUTH_DB_PATH` | `~/.muxcore/auth.db` | SQLite user/session store |
+| `AUTH_SECRET_KEY` | (unset) | 32-byte key (hex or base64) encrypting TOTP secrets at rest (AES-256-GCM); takes precedence over the file |
+| `AUTH_SECRET_KEY_FILE` | `<AUTH_DB_PATH dir>/auth-secret.key` | File holding the key; generated once with mode 0600 if missing. Back it up with the database: losing it makes stored TOTP secrets unrecoverable |
 | `AUTH_POLICY_FILE` | `policies.yaml` | RBAC policy YAML |
 | `AUTH_RP_ID` | `localhost` | WebAuthn relying party ID |
 | `AUTH_RP_ORIGINS` | `http://localhost:9401` | Comma-separated allowed WebAuthn origins |

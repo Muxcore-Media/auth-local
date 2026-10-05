@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -59,21 +60,52 @@ type Session struct {
 
 // Store manages users, sessions, and credentials in SQLite.
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+	db  *sql.DB
+	mu  sync.Mutex
+	box *secretBox
 }
 
 // New opens or creates the SQLite database and runs migrations.
+//
+// TOTP secrets are encrypted at rest with AES-256-GCM; the key comes from
+// AUTH_SECRET_KEY / AUTH_SECRET_KEY_FILE or an auto-generated key file next to
+// the database (see LoadOrCreateKey).
 func New(path string) (*Store, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+	key, err := LoadOrCreateKey(dir)
+	if err != nil {
+		return nil, fmt.Errorf("secret key: %w", err)
+	}
+	return NewWithKey(path, key)
+}
+
+// NewWithKey is New with an explicit 32-byte secret key.
+func NewWithKey(path string, key []byte) (*Store, error) {
+	box, err := newSecretBox(key)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	db.SetMaxOpenConns(1) // SQLite single-writer
 
-	s := &Store{db: db}
+	s := &Store{db: db, box: box}
 	if err := s.migrate(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := s.migrateSessionTokens(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.migrateTOTPSecrets(); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("chmod db: %w", err)
@@ -214,7 +246,7 @@ func (s *Store) GetUserByUsername(username string) (*User, error) {
 		`SELECT id, username, password, roles, COALESCE(tenant_id,''), totp_secret, totp_enabled, created_at FROM users WHERE username = ?`,
 		username,
 	)
-	return scanUser(row)
+	return s.scanUser(row)
 }
 
 func (s *Store) GetUser(id string) (*User, error) {
@@ -222,10 +254,10 @@ func (s *Store) GetUser(id string) (*User, error) {
 		`SELECT id, username, password, roles, COALESCE(tenant_id,''), totp_secret, totp_enabled, created_at FROM users WHERE id = ?`,
 		id,
 	)
-	return scanUser(row)
+	return s.scanUser(row)
 }
 
-func scanUser(row *sql.Row) (*User, error) {
+func (s *Store) scanUser(row *sql.Row) (*User, error) {
 	var u User
 	var rolesJSON, totpSecret, createdAtStr string
 	var totpEnabled int
@@ -235,7 +267,11 @@ func scanUser(row *sql.Row) (*User, error) {
 	if err := json.Unmarshal([]byte(rolesJSON), &u.Roles); err != nil {
 		slog.Warn("corrupt roles data for user", "user_id", u.ID, "error", err)
 	}
-	u.TOTPSecret = totpSecret
+	plainSecret, err := s.box.decrypt(totpSecret)
+	if err != nil {
+		return nil, err
+	}
+	u.TOTPSecret = plainSecret
 	u.TOTPEnabled = totpEnabled == 1
 	u.CreatedAt = parseTime(createdAtStr)
 	return &u, nil
@@ -435,7 +471,7 @@ func (s *Store) CreateSession(userID, kind string, ttl time.Duration) (*Session,
 	expiresAt := time.Now().Add(ttl)
 	_, err := s.db.Exec(
 		`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
-		token, userID, kind, expiresAt.Format(time.RFC3339),
+		hashSessionToken(token), userID, kind, expiresAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
@@ -453,17 +489,18 @@ func (s *Store) CreatePartialSession(userID string) (*Session, error) {
 
 func (s *Store) GetSession(token string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT token, user_id, kind, expires_at FROM sessions WHERE token = ?`,
-		token,
+		`SELECT user_id, kind, expires_at FROM sessions WHERE token = ?`,
+		hashSessionToken(token),
 	)
 	var sess Session
+	sess.Token = token // the caller's own raw token; only its hash is stored
 	var expiresAt string
-	if err := row.Scan(&sess.Token, &sess.UserID, &sess.Kind, &expiresAt); err != nil {
+	if err := row.Scan(&sess.UserID, &sess.Kind, &expiresAt); err != nil {
 		return nil, fmt.Errorf("session not found")
 	}
 	sess.ExpiresAt = parseTime(expiresAt)
 	if sess.ExpiresAt.IsZero() {
-		slog.Warn("session has unparseable expiration, treating as expired", "token", sess.Token[:8])
+		slog.Warn("session has unparseable expiration, treating as expired", "user_id", sess.UserID)
 		_ = s.DeleteSession(token)
 		return nil, fmt.Errorf("session expired")
 	}
@@ -475,7 +512,7 @@ func (s *Store) GetSession(token string) (*Session, error) {
 }
 
 func (s *Store) DeleteSession(token string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, hashSessionToken(token))
 	return err
 }
 
@@ -493,16 +530,20 @@ func (s *Store) UpgradeSession(partialToken string) (*Session, error) {
 		return nil, fmt.Errorf("session is not a partial token")
 	}
 	// Delete the partial session, create a full one.
-	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, partialToken)
+	_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, hashSessionToken(partialToken))
 	return s.CreateFullSession(sess.UserID)
 }
 
 // --- TOTP ---
 
 func (s *Store) SetTOTPSecret(userID, secret string) error {
-	_, err := s.db.Exec(
+	enc, err := s.box.encrypt(secret)
+	if err != nil {
+		return fmt.Errorf("encrypt totp secret: %w", err)
+	}
+	_, err = s.db.Exec(
 		`INSERT OR REPLACE INTO totp (user_id, secret, enabled, created_at) VALUES (?, ?, 1, datetime('now'))`,
-		userID, secret,
+		userID, enc,
 	)
 	return err
 }
@@ -514,7 +555,11 @@ func (s *Store) GetTOTPSecret(userID string) (string, bool, error) {
 	if err := row.Scan(&secret, &enabled); err != nil {
 		return "", false, nil // not found = not enabled
 	}
-	return secret, enabled == 1, nil
+	plain, err := s.box.decrypt(secret)
+	if err != nil {
+		return "", false, err
+	}
+	return plain, enabled == 1, nil
 }
 
 func (s *Store) VerifyTOTPSetup(userID string) error {
@@ -683,6 +728,41 @@ func newID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// sessionHashPrefix marks a stored session token as sha256(raw) hex; anything
+// else in sessions.token is a legacy plaintext token migrated on open.
+const sessionHashPrefix = "h1:"
+
+func hashSessionToken(raw string) string { return sessionHashPrefix + sha256Hex(raw) }
+
+// migrateSessionTokens hashes legacy plaintext session tokens in place
+// (idempotent) so existing sessions stay valid.
+func (s *Store) migrateSessionTokens() error {
+	rows, err := s.db.Query(`SELECT token FROM sessions WHERE token NOT LIKE 'h1:%'`)
+	if err != nil {
+		return fmt.Errorf("scan sessions: %w", err)
+	}
+	var plain []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		plain = append(plain, t)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	for _, t := range plain {
+		if _, err := s.db.Exec(`UPDATE sessions SET token = ? WHERE token = ?`, hashSessionToken(t), t); err != nil {
+			return fmt.Errorf("hash session token: %w", err)
+		}
+	}
+	return nil
 }
 
 // sha256Hex returns the hex-encoded SHA-256 hash of s.

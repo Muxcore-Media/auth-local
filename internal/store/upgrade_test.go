@@ -3,10 +3,12 @@ package store
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Muxcore-Media/core/sdk/go/module/moduletest"
+	"github.com/pquerna/otp/totp"
 )
 
 // TestUpgradeFromV0_1_5 opens the snapshot produced by tag v0.1.5 with the
@@ -99,6 +101,11 @@ func checkUpgraded(t *testing.T, s *Store, freshSchema moduletest.SchemaInfo, fi
 		if sess.UserID != tc.userID || sess.Kind != tc.kind || sess.ExpiresAt.Year() != 2099 {
 			t.Errorf("session %s = %+v", tc.token, sess)
 		}
+		var stored string
+		if err := s.db.QueryRow(`SELECT token FROM sessions WHERE user_id = ? AND kind = ?`, tc.userID, tc.kind).Scan(&stored); err != nil ||
+			stored != hashSessionToken(tc.token) || strings.Contains(stored, tc.token) {
+			t.Errorf("session %s stored as %q, %v; want hashed", tc.token, stored, err)
+		}
 	}
 
 	// API tokens.
@@ -126,6 +133,23 @@ func checkUpgraded(t *testing.T, s *Store, freshSchema moduletest.SchemaInfo, fi
 	secret, enabled, err := s.GetTOTPSecret(carol.ID)
 	if err != nil || secret != "KRSXG5CTMVRXEZLU" || !enabled {
 		t.Errorf("carol totp = %q, %v, %v", secret, enabled, err)
+	}
+	// NFR-SEC-005: seeded plaintext TOTP secrets are encrypted at rest after open,
+	// and still validate.
+	for _, q := range []string{
+		`SELECT secret FROM totp WHERE user_id = '` + carol.ID + `'`,
+		`SELECT totp_secret FROM users WHERE id = '` + alice.ID + `'`,
+	} {
+		var raw string
+		if err := s.db.QueryRow(q).Scan(&raw); err != nil || !strings.HasPrefix(raw, "v1:") || strings.Contains(raw, "KRSXG5") || strings.Contains(raw, "JBSWY3") {
+			t.Errorf("%s = %q, %v; want v1: ciphertext", q, raw, err)
+		}
+	}
+	for _, c := range []struct{ secret string }{{secret}, {alice.TOTPSecret}} {
+		code, err := totp.GenerateCode(c.secret, time.Now())
+		if err != nil || !totp.Validate(code, c.secret) {
+			t.Errorf("TOTP validation failed for seeded secret: %v", err)
+		}
 	}
 
 	// WebAuthn credentials and sessions.

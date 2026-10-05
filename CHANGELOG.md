@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.19] - 2026-10-05
+
+
+### Security
+- TOTP secrets are now encrypted at rest (NFR-SEC-005) with AES-256-GCM (`v1:` + base64(nonce||ciphertext)) in both the `totp` table and the legacy `users.totp_secret` column. The key comes from `AUTH_SECRET_KEY` (32 bytes, hex or base64) or the file named by `AUTH_SECRET_KEY_FILE`; when neither is set a random key is generated once as `auth-secret.key` (0600) next to the database. Existing plaintext secrets are encrypted in place on startup (idempotent; upgrade test extended). Opening a database with the wrong key fails at startup with an explicit error instead of silently locking users out. The database directory is created 0700 and the database file is 0600.
+- Session tokens are stored as `h1:` + sha256(token) hex instead of plaintext (NFR-SEC-005); lookups, logout, revoke-all and partial-to-full upgrade hash the presented token, and existing plaintext rows are hashed in place on startup (idempotent) so live sessions stay valid. No API lists or returns stored session tokens; the raw token is only returned once, at creation.
+- A TOTP secret that cannot be read no longer skips the second factor at login (HTTP and gRPC now fail closed).
+
 ## [0.1.18] - 2026-10-05
 
 ### Changed
