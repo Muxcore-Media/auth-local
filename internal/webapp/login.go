@@ -437,7 +437,13 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Check if TOTP is required.
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
-	if err == nil && totpEnabled && secret != "" {
+	if err != nil {
+		// Fail closed: never skip the second factor because the secret is unreadable.
+		slog.Error("login: totp secret unreadable", "user_id", user.ID, "error", err)
+		h.renderLogin(w, r, "Internal error")
+		return
+	}
+	if totpEnabled && secret != "" {
 		partialSess, err := h.store.CreatePartialSession(user.ID)
 		if err != nil {
 			slog.Error("login: create partial session failed", "error", err)
@@ -568,7 +574,12 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 	h.recordSuccess(userKey(username))
 
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
-	if err == nil && totpEnabled && secret != "" {
+	if err != nil {
+		slog.Error("login: totp secret unreadable", "user_id", user.ID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if totpEnabled && secret != "" {
 		partialSess, err := h.store.CreatePartialSession(user.ID)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)

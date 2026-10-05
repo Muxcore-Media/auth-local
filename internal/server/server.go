@@ -120,7 +120,11 @@ func (s *AuthServer) authPassword(req *authv1.AuthenticateRequest) (*authv1.Auth
 
 	// Check if TOTP is enabled.
 	_, enabled, err := s.store.GetTOTPSecret(user.ID)
-	if err == nil && enabled {
+	if err != nil {
+		// Fail closed: an unreadable secret must not skip the second factor.
+		return nil, status.Error(codes.Internal, "totp secret unreadable")
+	}
+	if enabled {
 		sess, err := s.store.CreatePartialSession(user.ID)
 		if err != nil {
 			return nil, status.Error(codes.Internal, "create partial session failed")
