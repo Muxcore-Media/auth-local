@@ -1,53 +1,53 @@
+# Generated from Muxcore-Media/umbrella scripts/ci-templates/go-module-release.yml
+# by scripts/sync-ci.sh — edit the template, not this copy (ADR-0003).
+# Builds release binaries for a module tag. Container images are built centrally
+# from the umbrella (_mvp/scripts/publish-module-images.sh), not per module.
 name: Release
+
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GOPRIVATE: github.com/Muxcore-Media/*
+  GONOSUMDB: github.com/Muxcore-Media/*
 
 jobs:
-  goreleaser:
-    runs-on: self-hosted
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
-          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
-      - name: Checkout core dependency
+          go-version-file: go.mod
+          cache: true
+      - name: Private module access
         env:
-          TOKEN: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+          TOKEN: ${{ secrets.MUXCORE_CI_TOKEN }}
         run: |
-          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Muxcore-Media/core.git" core
-      - name: Prepare workspace layout
-        run: |
-          mkdir -p auth-local
-          shopt -s dotglob
-          for item in *; do
-            case "$item" in core|auth-local) continue ;; esac
-            mv "$item" auth-local/
-          done
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.26"
-          cache: false
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/Muxcore-Media/".insteadOf "https://github.com/Muxcore-Media/"
+          fi
       - name: Build binaries
-        working-directory: ./auth-local
         run: |
+          name="${GITHUB_REPOSITORY#*/}"
+          entry=./cmd/module
+          [ -d "$entry" ] || entry=.
           mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/auth-local-linux-amd64 ./cmd/module
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/auth-local-linux-arm64 ./cmd/module
-      - name: Lowercase image name
-        run: |
-          echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "dist/${name}-${os}-${arch}" "$entry"
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          context: ./auth-local
-          push: true
-          tags: |
-            ghcr.io/${{ env.IMAGE_OWNER }}/auth-local:${{ github.ref_name }}
-            ghcr.io/${{ env.IMAGE_OWNER }}/auth-local:latest
-      - name: Create release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: auth-local/dist/*
+          files: dist/*
           generate_release_notes: true
