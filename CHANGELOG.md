@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.16] - 2026-10-05
+
+
+### Security
+- The gRPC server only requests client certificates when a mesh CA is configured; without one it no longer verifies them against the system roots (a publicly issued certificate with a matching CN could otherwise claim a module identity).
+
+### Fixed
+- Login rate limiting counted successful logins and only reset when a block triggered, so ordinary use (about 6 logins from one IP) returned HTTP 429. It now counts only failed authentication attempts (wrong password, wrong TOTP code): 10 failures per 15-minute fixed window per client IP and per normalised username (per user ID for the TOTP step). A successful login clears only the per-username (per-user-ID for TOTP) counter, never the per-IP one, so a valid account cannot be used to wipe an IP's failures; counts expire with the window, and `Retry-After` reflects the remaining window. Unknown usernames are tracked and answered identically to real ones, so responses do not reveal whether an account exists. Successful logins are never throttled.
+- Mesh identity (`internal/server/mesh_identity.go`) now requires a verified TLS client chain (`len(VerifiedChains) > 0`) in addition to the certificate CN; a presented but unverified (e.g. self-signed) certificate with a matching CN is rejected.
+
 ## [0.1.15] - 2026-10-05
 
 

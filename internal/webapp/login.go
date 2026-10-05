@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,12 +43,6 @@ type LoginPageData struct {
 	PartialToken string
 }
 
-type loginRateRecord struct {
-	count        int
-	blockedUntil time.Time
-	lastSeen     time.Time
-}
-
 type codeEntry struct {
 	sessToken string
 	expiresAt time.Time
@@ -58,8 +53,7 @@ type Handler struct {
 	auth           AdminHTTPGuard
 	publicURL      string
 	trustedProxies []net.IPNet
-	rateMu         sync.Mutex
-	rateRecords    map[string]*loginRateRecord
+	limiter        *failLimiter
 	codesMu        sync.Mutex
 	codes          map[string]*codeEntry
 	stopCh         chan struct{}
@@ -84,7 +78,7 @@ func NewWithAuth(store *authStore.Store, auth AdminHTTPGuard, publicURL string, 
 		auth:           auth,
 		publicURL:      strings.TrimRight(strings.TrimSpace(publicURL), "/"),
 		trustedProxies: trustedProxies,
-		rateRecords:    make(map[string]*loginRateRecord),
+		limiter:        newFailLimiter(loginMaxFailures, loginFailWindow),
 		codes:          make(map[string]*codeEntry),
 		stopCh:         make(chan struct{}),
 	}
@@ -283,37 +277,39 @@ func (h *Handler) rateLimitCleanup() {
 		case <-h.stopCh:
 			return
 		case <-ticker.C:
-			h.rateMu.Lock()
-			cutoff := time.Now().Add(-10 * time.Minute)
-			for ip, rec := range h.rateRecords {
-				if rec.lastSeen.Before(cutoff) {
-					delete(h.rateRecords, ip)
-				}
-			}
-			h.rateMu.Unlock()
+			h.limiter.sweep()
 		}
 	}
 }
 
-func (h *Handler) checkRateLimit(ip string) bool {
-	h.rateMu.Lock()
-	defer h.rateMu.Unlock()
-	rec, exists := h.rateRecords[ip]
-	if !exists {
-		rec = &loginRateRecord{}
-		h.rateRecords[ip] = rec
+// tooMany writes the generic 429 response if any key is blocked. The response
+// is identical for known and unknown usernames.
+func (h *Handler) tooMany(w http.ResponseWriter, keys ...string) bool {
+	for _, k := range keys {
+		if h.limiter.blocked(k) {
+			w.Header().Set("Retry-After", strconv.Itoa(h.limiter.retryAfter(k)))
+			http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+			return true
+		}
 	}
-	rec.lastSeen = time.Now()
-	if time.Now().Before(rec.blockedUntil) {
-		return false
-	}
-	rec.count++
-	if rec.count >= 6 {
-		rec.blockedUntil = time.Now().Add(1 * time.Minute)
-		rec.count = 0
-	}
-	return true
+	return false
 }
+
+func (h *Handler) recordFailure(keys ...string) {
+	for _, k := range keys {
+		h.limiter.fail(k)
+	}
+}
+
+func (h *Handler) recordSuccess(keys ...string) {
+	for _, k := range keys {
+		h.limiter.reset(k)
+	}
+}
+
+func ipKey(ip string) string        { return "ip:" + ip }
+func userKey(name string) string    { return "user:" + strings.ToLower(strings.TrimSpace(name)) }
+func totpUserKey(uid string) string { return "uid:" + uid }
 
 // --- Redirect with one-time code ---
 
@@ -399,9 +395,7 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if h.tooMany(w, ipKey(ip)) {
 		return
 	}
 
@@ -427,12 +421,19 @@ func (h *Handler) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.tooMany(w, userKey(username)) {
+		return
+	}
+
 	user, err := h.store.VerifyPassword(username, password)
 	if err != nil {
+		h.recordFailure(ipKey(ip), userKey(username))
 		slog.Warn("login: password verification failed", "username", username)
 		h.renderLogin(w, r, "Invalid username or password")
 		return
 	}
+
+	h.recordSuccess(userKey(username))
 
 	// Check if TOTP is required.
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
@@ -466,9 +467,7 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if h.tooMany(w, ipKey(ip)) {
 		return
 	}
 
@@ -507,7 +506,11 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.tooMany(w, totpUserKey(partialSess.UserID)) {
+		return
+	}
 	if !totp.Validate(totpCode, secret) {
+		h.recordFailure(ipKey(ip), totpUserKey(partialSess.UserID))
 		h.renderTOTP(w, r, partialToken, redirect, "Invalid code — try again")
 		return
 	}
@@ -519,6 +522,7 @@ func (h *Handler) totpLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.recordSuccess(totpUserKey(partialSess.UserID))
 	h.redirectWithCode(w, r, fullSess.Token, redirect)
 }
 
@@ -530,9 +534,7 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if h.tooMany(w, ipKey(ip)) {
 		return
 	}
 
@@ -551,12 +553,19 @@ func (h *Handler) deviceLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.tooMany(w, userKey(username)) {
+		return
+	}
+
 	user, err := h.store.VerifyPassword(username, password)
 	if err != nil {
+		h.recordFailure(ipKey(ip), userKey(username))
 		slog.Warn("device login: password verification failed", "username", username)
 		http.Error(w, "invalid username or password", http.StatusUnauthorized)
 		return
 	}
+
+	h.recordSuccess(userKey(username))
 
 	secret, totpEnabled, err := h.store.GetTOTPSecret(user.ID)
 	if err == nil && totpEnabled && secret != "" {
@@ -599,9 +608,7 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := h.extractIP(r)
-	if !h.checkRateLimit(ip) {
-		w.Header().Set("Retry-After", "60")
-		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
+	if h.tooMany(w, ipKey(ip)) {
 		return
 	}
 
@@ -635,7 +642,11 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "TOTP is not enabled", http.StatusBadRequest)
 		return
 	}
+	if h.tooMany(w, totpUserKey(partialSess.UserID)) {
+		return
+	}
 	if !totp.Validate(totpCode, secret) {
+		h.recordFailure(ipKey(ip), totpUserKey(partialSess.UserID))
 		http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
 		return
 	}
@@ -645,6 +656,7 @@ func (h *Handler) deviceTOTPLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	h.recordSuccess(totpUserKey(partialSess.UserID))
 	user, err := h.store.GetUser(fullSess.UserID)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)

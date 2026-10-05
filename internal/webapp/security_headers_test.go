@@ -166,16 +166,17 @@ func TestLoginRateLimitSecurityHeaders(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	ip := "203.0.113.50:12345"
-	for i := 0; i < 7; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/login", nil)
+	// Only failed authentication attempts count: 10 failures, then 429.
+	for i := 0; i < 11; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/login/device", strings.NewReader(`{"username":"nobody","password":"wrong"}`))
 		req.RemoteAddr = ip
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if i < 6 && rec.Code == http.StatusTooManyRequests {
+		if i < 10 && rec.Code == http.StatusTooManyRequests {
 			t.Fatalf("unexpected rate limit on attempt %d", i+1)
 		}
-		if i == 6 && rec.Code != http.StatusTooManyRequests {
-			t.Fatalf("attempt 7: status %d want 429", rec.Code)
+		if i == 10 && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt 11: status %d want 429", rec.Code)
 		}
 		if rec.Header().Get("X-Frame-Options") != "DENY" {
 			t.Fatalf("attempt %d: missing X-Frame-Options", i+1)
