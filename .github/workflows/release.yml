@@ -34,15 +34,22 @@ jobs:
             git config --global url."https://x-access-token:${TOKEN}@github.com/Muxcore-Media/".insteadOf "https://github.com/Muxcore-Media/"
           fi
       - name: Build binaries
+        # Optional repo variables: RELEASE_ENTRY (main package, default
+        # ./cmd/module or .) and RELEASE_LDFLAGS (extra -ldflags; ${VERSION}
+        # expands to the tag).
+        env:
+          RELEASE_ENTRY: ${{ vars.RELEASE_ENTRY }}
+          RELEASE_LDFLAGS: ${{ vars.RELEASE_LDFLAGS }}
         run: |
           name="${GITHUB_REPOSITORY#*/}"
-          entry=./cmd/module
+          entry="${RELEASE_ENTRY:-./cmd/module}"
           [ -d "$entry" ] || entry=.
+          extra="${RELEASE_LDFLAGS//\$\{VERSION\}/${GITHUB_REF_NAME}}"
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/arm64; do
             os="${target%/*}"; arch="${target#*/}"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
-              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -ldflags="-s -w -X main.version=${GITHUB_REF_NAME} ${extra}" \
               -o "dist/${name}-${os}-${arch}" "$entry"
           done
           (cd dist && sha256sum * > SHA256SUMS)
