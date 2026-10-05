@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	manifest "github.com/Muxcore-Media/auth-local"
 	"github.com/Muxcore-Media/auth-local/internal/grpctls"
 	"github.com/Muxcore-Media/auth-local/internal/policy"
 	"github.com/Muxcore-Media/auth-local/internal/server"
@@ -158,7 +159,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Auth Local",
-		Version:      "0.1.14",
+		Version:      modulesdk.ManifestVersion(manifest.ManifestJSON),
 		Roles:        []string{"security"},
 		Description:  "Local authentication and authorization provider",
 		Author:       "MuxCore",
