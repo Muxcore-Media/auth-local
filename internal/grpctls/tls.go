@@ -80,7 +80,10 @@ func ServerConfig(dataDir string) (*tls.Config, error) {
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
-		ClientAuth:   tls.VerifyClientCertIfGiven,
+		// Client certificates are only requested when a mesh CA is configured
+		// (below); verifying them against the system roots would let any
+		// publicly issued certificate with a matching CN claim a module identity.
+		ClientAuth: tls.NoClientCert,
 	}
 
 	if caFile != "" {
@@ -89,6 +92,7 @@ func ServerConfig(dataDir string) (*tls.Config, error) {
 			return nil, err
 		}
 		cfg.ClientCAs = pool
+		cfg.ClientAuth = tls.VerifyClientCertIfGiven
 	}
 
 	return cfg, nil

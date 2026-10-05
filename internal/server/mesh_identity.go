@@ -24,7 +24,9 @@ func peerCertCN(ctx context.Context) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if len(ti.State.PeerCertificates) == 0 {
+	// Require a chain verified against the server's ClientCAs; a presented but
+	// unverified certificate (e.g. self-signed with a matching CN) is not identity.
+	if len(ti.State.PeerCertificates) == 0 || len(ti.State.VerifiedChains) == 0 {
 		return "", false
 	}
 	cn := strings.TrimSpace(ti.State.PeerCertificates[0].Subject.CommonName)
@@ -62,6 +64,7 @@ func verifiedMeshContext(callerID string) context.Context {
 	ti := credentials.TLSInfo{
 		State: tls.ConnectionState{
 			PeerCertificates: []*x509.Certificate{cert},
+			VerifiedChains:   [][]*x509.Certificate{{cert}},
 		},
 	}
 	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: ti})
@@ -71,4 +74,12 @@ func verifiedMeshContext(callerID string) context.Context {
 
 func pkixName(cn string) pkix.Name {
 	return pkix.Name{CommonName: cn}
+}
+
+// unverifiedMeshContext presents a matching-CN certificate without a verified chain. For tests only.
+func unverifiedMeshContext(callerID string) context.Context {
+	cert := &x509.Certificate{Subject: pkixName(callerID)}
+	ti := credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}}
+	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: ti})
+	return metadata.NewIncomingContext(ctx, metadata.Pairs(callerIDMetadataKey, callerID))
 }
