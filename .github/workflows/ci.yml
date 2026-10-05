@@ -69,6 +69,6 @@ jobs:
           if [ -n "$TOKEN" ]; then
             git config --global url."https://x-access-token:${TOKEN}@github.com/Muxcore-Media/".insteadOf "https://github.com/Muxcore-Media/"
           fi
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
