@@ -36,6 +36,8 @@ type AuthServer struct {
 	rpID         string
 	rpOrigins    []string
 	rpName       string
+	// onUserDeleted runs after the auth row is gone. Nil skips the event.
+	onUserDeleted func(ctx context.Context, userID string)
 }
 
 // Metrics returns Prometheus-format metrics.
@@ -57,6 +59,23 @@ func (s *AuthServer) Metrics() string {
 
 func New(s *authStore.Store, p *policy.Policy, rpID string, rpOrigins []string, rpName string) *AuthServer {
 	return &AuthServer{store: s, policy: p, rpID: rpID, rpOrigins: rpOrigins, rpName: rpName}
+}
+
+// SetUserDeletedPublisher registers the identity.user.deleted hook. The hook
+// runs only after the user row is deleted. A hook error is logged and does
+// not roll back the delete.
+func (s *AuthServer) SetUserDeletedPublisher(fn func(ctx context.Context, userID string)) {
+	if s == nil {
+		return
+	}
+	s.onUserDeleted = fn
+}
+
+func (s *AuthServer) publishUserDeleted(ctx context.Context, userID string) {
+	if s == nil || s.onUserDeleted == nil || strings.TrimSpace(userID) == "" {
+		return
+	}
+	s.onUserDeleted(ctx, userID)
 }
 
 func (s *AuthServer) RegisterWithGRPC(srv *grpc.Server) {
@@ -479,6 +498,7 @@ func (s *AuthServer) DeleteUser(ctx context.Context, req *authv1.DeleteUserReque
 	if err := s.store.DeleteUser(req.UserId); err != nil {
 		return &authv1.DeleteUserResponse{Error: err.Error()}, nil
 	}
+	s.publishUserDeleted(ctx, req.UserId)
 	return &authv1.DeleteUserResponse{}, nil
 }
 

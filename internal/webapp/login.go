@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -57,12 +58,22 @@ type Handler struct {
 	codesMu        sync.Mutex
 	codes          map[string]*codeEntry
 	stopCh         chan struct{}
+	onUserDeleted  func(ctx context.Context, userID string)
 }
 
 // AdminHTTPGuard gates admin-only HTTP routes (invite management).
 type AdminHTTPGuard interface {
 	RequireAdminHTTP(w http.ResponseWriter, r *http.Request) bool
 	HTTPUser(r *http.Request) (*authStore.User, error)
+}
+
+// SetUserDeletedPublisher registers the identity.user.deleted hook. It runs
+// only after the HTTP delete succeeds.
+func (h *Handler) SetUserDeletedPublisher(fn func(ctx context.Context, userID string)) {
+	if h == nil {
+		return
+	}
+	h.onUserDeleted = fn
 }
 
 func New(store *authStore.Store, publicURL string, trustedProxies []net.IPNet) *Handler {

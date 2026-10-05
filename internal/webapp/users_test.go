@@ -1,6 +1,7 @@
 package webapp
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,32 @@ func TestUsersAPIListAndRoleAndDelete(t *testing.T) {
 	mux.ServeHTTP(delW, delReq)
 	if delW.Code != http.StatusOK {
 		t.Fatalf("delete %d %s", delW.Code, delW.Body.String())
+	}
+}
+
+func TestUsersAPIDeletePublishesIdentityEvent(t *testing.T) {
+	h, _, st := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	auth := adminAuthHeader(t, st)
+	member, err := st.CreateUser("pat", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	h.SetUserDeletedPublisher(func(_ context.Context, userID string) {
+		got = append(got, userID)
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/users/"+member.ID, nil)
+	req.Header.Set("Authorization", auth)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete %d %s", w.Code, w.Body.String())
+	}
+	if len(got) != 1 || got[0] != member.ID {
+		t.Fatalf("published %#v", got)
 	}
 }
 

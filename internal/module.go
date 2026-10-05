@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -25,6 +26,7 @@ import (
 	"github.com/Muxcore-Media/auth-local/internal/webapp"
 	"github.com/Muxcore-Media/auth-local/internal/webauthn"
 	"github.com/Muxcore-Media/core/pkg/contracts"
+	"github.com/Muxcore-Media/core/sdk/go/client"
 	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
 )
 
@@ -50,6 +52,8 @@ type Module struct {
 	rpOrigins      []string
 	rpName         string
 	trustedProxies []net.IPNet
+	mc             atomic.Pointer[client.Client]
+	dialCancel     context.CancelFunc
 }
 
 // Config holds module settings. Non-empty fields override environment; empty
@@ -205,6 +209,13 @@ func (m *Module) Init(ctx context.Context) error {
 	}
 	publicURL := os.Getenv("AUTH_HTTP_URL")
 	m.webHandler = webapp.NewWithAuth(m.store, m.authSrv, publicURL, m.trustedProxies)
+	publish := func(ctx context.Context, userID string) {
+		if err := m.publishUserDeleted(ctx, userID); err != nil {
+			slog.Warn("identity.user.deleted", "error", err)
+		}
+	}
+	m.authSrv.SetUserDeletedPublisher(publish)
+	m.webHandler.SetUserDeletedPublisher(publish)
 	slog.Info("auth-local initialized",
 		"grpc", m.grpcAddr,
 		"http", m.httpAddr,
@@ -317,6 +328,9 @@ func (m *Module) Start(ctx context.Context) error {
 	m.sighupStop = sighupStop
 	m.sighupDone = sighupDone
 	signal.Notify(sighupCh, syscall.SIGHUP)
+	dialCtx, dialCancel := context.WithCancel(context.Background())
+	m.dialCancel = dialCancel
+	go m.dialCore(dialCtx)
 	go func() {
 		defer close(sighupDone)
 		for {
@@ -335,6 +349,12 @@ func (m *Module) Start(ctx context.Context) error {
 }
 
 func (m *Module) Stop(ctx context.Context) error {
+	if m.dialCancel != nil {
+		m.dialCancel()
+	}
+	if c := m.mc.Swap(nil); c != nil {
+		c.Close()
+	}
 	if m.sighupStop != nil {
 		select {
 		case <-m.sighupStop:

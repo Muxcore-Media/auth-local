@@ -189,6 +189,9 @@ func (h *Handler) apiUserAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, delErr.Error(), http.StatusBadRequest)
 			return
 		}
+		if h.onUserDeleted != nil {
+			h.onUserDeleted(r.Context(), id)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"removed": true, "id": id})
 	case http.MethodPatch, http.MethodPost:
 		var body struct {
