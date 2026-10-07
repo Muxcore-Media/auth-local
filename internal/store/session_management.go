@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -241,22 +240,12 @@ func (s *Store) RevokeSession(ctx context.Context, userID, sessionID string) err
 
 // SessionAdminRoles loads current roles through a current bearer session. It is
 // separate from mesh authorization and has no fallback to a module identity.
-// sql.ErrNoRows covers missing/expired/partial sessions and deleted users;
-// other database errors remain visible to the RPC for Internal status mapping.
+// ErrInvalidSession covers missing/expired/partial sessions and deleted users;
+// operational errors remain visible to the RPC for Internal status mapping.
 func (s *Store) SessionAdminRoles(ctx context.Context, token string) ([]string, error) {
-	var rolesJSON, expiresAt string
-	err := s.db.QueryRowContext(ctx, `SELECT u.roles, s.expires_at
-		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token = ? AND s.kind IN ('full', 'api-token')`, hashSessionToken(token)).Scan(&rolesJSON, &expiresAt)
+	identity, err := s.ValidateSession(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	if expiry := parseTime(expiresAt); expiry.IsZero() || !expiry.After(time.Now()) {
-		return nil, sql.ErrNoRows
-	}
-	var roles []string
-	if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
-		return nil, err
-	}
-	return roles, nil
+	return identity.Roles, nil
 }

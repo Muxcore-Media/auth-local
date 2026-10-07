@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -263,25 +264,19 @@ func (s *AuthServer) authAPIKey(req *authv1.AuthenticateRequest) (*authv1.Authen
 }
 
 func (s *AuthServer) Validate(ctx context.Context, req *authv1.ValidateRequest) (*authv1.ValidateResponse, error) {
-	sess, err := s.store.GetSession(req.Token)
-	if err != nil {
+	identity, err := s.store.ValidateSession(ctx, req.GetToken())
+	if errors.Is(err, authStore.ErrInvalidSession) {
 		return &authv1.ValidateResponse{Valid: false, Error: "invalid or expired token"}, nil
 	}
-	if sess.Kind != "full" && sess.Kind != "api-token" {
-		return &authv1.ValidateResponse{Valid: false, Error: "session not fully authenticated"}, nil
-	}
-
-	user, err := s.store.GetUser(sess.UserID)
 	if err != nil {
-		return &authv1.ValidateResponse{Valid: false, Error: "user not found"}, nil
+		return nil, sessionManagementError(err, "session validation failed")
 	}
-
 	return &authv1.ValidateResponse{
 		Valid:    true,
-		UserId:   user.ID,
-		Username: user.Username,
-		Roles:    user.Roles,
-		TenantId: user.TenantID,
+		UserId:   identity.UserID,
+		Username: identity.Username,
+		Roles:    identity.Roles,
+		TenantId: identity.TenantID,
 	}, nil
 }
 
