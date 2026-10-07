@@ -1,5 +1,7 @@
 github.com/Muxcore-Media/core v0.6.14 h1:txrjE0arrInXP1LVPC3dPRReehexEqmPRMVtM66rSPQ=
 github.com/Muxcore-Media/core v0.6.14/go.mod h1:lZ6tuCEjwmXI0zd6lhKOkm/qpB1Js4rrB+Bs9lCNZjA=
+github.com/Muxcore-Media/core v0.6.16 h1:1gjVCbMfujqnXKr8JMlMSVCwkTdtq5IYRCFLNM+7Oy4=
+github.com/Muxcore-Media/core v0.6.16/go.mod h1:lZ6tuCEjwmXI0zd6lhKOkm/qpB1Js4rrB+Bs9lCNZjA=
 github.com/Muxcore-Media/core/pkg/contracts v0.6.0 h1:NNaPjtDT81ESDDSMiEk2LGn6XsIFz+pKhXrr1TeSH+0=
 github.com/Muxcore-Media/core/pkg/contracts v0.6.0/go.mod h1:riu1DrsCAJ9AJf9uf8IG1W8nYzcQ+Y7HiT6okz7Lmck=
 github.com/Muxcore-Media/core/sdk/go/module v0.6.4 h1:5+sjT3Y4MD17vaLAVAVWcJMJswtrgYfAToEgJT1p35o=
