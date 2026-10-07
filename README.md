@@ -143,6 +143,36 @@ authctl token rm <token-id>
 
 Flags: `-addr` (default `localhost:9403`), `-token` / `AUTHCTL_TOKEN`.
 
+### Administrative session RPCs
+
+`AuthService.ListSessions` and `RevokeSession` implement the core v0.6.16
+administrative contract. Both require a current, fully authenticated `full` or
+`api-token` bearer in `x-auth-token` and recheck the user's current `admin` role.
+A mesh certificate alone does not authorize these operations.
+
+Lists include only active full/API sessions belonging to existing users, with an
+optional user filter. Results contain independent management IDs, user metadata,
+kind and UTC timestamps; they contain no bearer or bearer hash. Pages default to
+100 records and allow at most 500. Continuations are encrypted, authenticated and
+bound to the user filter; they resume after the last creation-time/ID pair even
+if that session has since expired or been revoked. The existing secret key also
+protects continuations with a separate cryptographic context; changing that key
+invalidates outstanding continuations.
+
+Opening an existing database transactionally backfills random session IDs and a
+unique index, preserving stored bearers and timestamps. Reopening preserves IDs.
+Revoke atomically matches both user ID and session ID; unknown or previously
+revoked pairs succeed. The revoked bearer fails its next provider validation,
+while an API key that minted the session remains usable.
+
+This provider interface does not yet deliver the all-device UI (FR-AUTH-007).
+Apps must revalidate cached upstream bearers to observe revocation; BFF Quick
+Connect's local-only sessions also need a provider device-grant integration.
+
+Provider regression checks (including migration, pagination, authorization and
+gRPC revocation) run with `go test -race -count=1 ./internal/store ./internal/server`;
+the module-wide check is `make test`.
+
 ## Implementation
 
 - Registers with capabilities: `"auth"`, `"authorizer"`, `"identity"`

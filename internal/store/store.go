@@ -181,7 +181,7 @@ func (s *Store) migrate() error {
 	if err := s.migrateTenantColumns(); err != nil {
 		return err
 	}
-	return nil
+	return s.migrateSessionIDs()
 }
 
 func (s *Store) migrateTenantColumns() error {
@@ -468,10 +468,14 @@ func (s *Store) VerifyPassword(username, password string) (*User, error) {
 
 func (s *Store) CreateSession(userID, kind string, ttl time.Duration) (*Session, error) {
 	token := newSessionToken()
+	sessionID, err := newManagementSessionID()
+	if err != nil {
+		return nil, fmt.Errorf("create session ID: %w", err)
+	}
 	expiresAt := time.Now().Add(ttl)
-	_, err := s.db.Exec(
-		`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
-		hashSessionToken(token), userID, kind, expiresAt.Format(time.RFC3339),
+	_, err = s.db.Exec(
+		`INSERT INTO sessions (token, session_id, user_id, kind, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		hashSessionToken(token), sessionID, userID, kind, expiresAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
