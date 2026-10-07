@@ -3,7 +3,7 @@ module github.com/Muxcore-Media/auth-local
 go 1.26.6
 
 require (
-	github.com/Muxcore-Media/core v0.6.14
+	github.com/Muxcore-Media/core v0.6.16
 	github.com/Muxcore-Media/core/pkg/contracts v0.6.0
 	github.com/Muxcore-Media/core/sdk/go/module v0.6.4
 	github.com/go-webauthn/webauthn v0.17.4
