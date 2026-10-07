@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"time"
 
@@ -21,7 +20,7 @@ func (s *AuthServer) requireSessionAdmin(ctx context.Context) error {
 		return status.Error(codes.Unauthenticated, "missing auth token")
 	}
 	roles, err := s.store.SessionAdminRoles(ctx, token)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, authStore.ErrInvalidSession) {
 		return status.Error(codes.Unauthenticated, "invalid or expired session")
 	}
 	if err != nil {

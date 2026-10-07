@@ -173,6 +173,16 @@ Provider regression checks (including migration, pagination, authorization and
 gRPC revocation) run with `go test -race -count=1 ./internal/store ./internal/server`;
 the module-wide check is `make test`.
 
+`AuthService.Validate` separates invalid credentials from a provider failure.
+Missing, revoked, expired, partial or orphaned sessions return `valid: false`.
+Database failures and corrupt identity/session data return gRPC `Internal`;
+canceled requests and elapsed deadlines retain their corresponding gRPC status.
+Clients should deny access on those errors while preserving their local cookie
+for a retry. Successful validation returns the user's current ID, username,
+roles and tenant, including empty roles/tenant after a claims change. The lookup
+does not read password hashes or decrypt TOTP secrets. Only definitively expired
+sessions receive best-effort lazy cleanup; unreadable records are preserved.
+
 ## Implementation
 
 - Registers with capabilities: `"auth"`, `"authorizer"`, `"identity"`
