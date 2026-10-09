@@ -79,6 +79,8 @@ Send `SIGHUP` to reload the policy file without restarting.
 | `AUTH_RP_ORIGINS` | `http://localhost:9401` | Comma-separated allowed WebAuthn origins |
 | `AUTH_RP_NAME` | `MuxCore` | WebAuthn relying party display name |
 | `AUTH_TRUSTED_PROXIES` | loopback | Comma-separated CIDRs whose `X-Forwarded-For` is trusted |
+| `AUTH_ERASURE_CONSUMERS` | (unset) | Comma-separated module ids (mesh certificate CNs) allowed to call `ListUserErasures`/`AckUserErasure` (ADR-0035 §2, umbrella `docs/adr/0035-user-erasure-ledger.md`). Empty or unset: both RPCs fail closed with `PermissionDenied` |
+| `AUTH_ERASURE_REQUIRED` | (unset) | Comma-separated module ids whose `OK` acknowledgement completes an erasure (`GetUserErasureStatus`). Deployment generates it from the enabled `personal: true` manifest entries; each should also be in `AUTH_ERASURE_CONSUMERS`. Empty: every erasure reports complete |
 
 ### gRPC TLS (production)
 
@@ -139,9 +141,13 @@ authctl totp enable|disable|status <user>
 authctl token create <user> <name>      # Create API token
 authctl token list <user>
 authctl token rm <token-id>
+authctl erasures export [-db <auth.db>] <ledger.json>   # offline, auth-local stopped
+authctl erasures import [-db <auth.db>] <ledger.json>   # offline, auth-local stopped
 ```
 
-Flags: `-addr` (default `localhost:9403`), `-token` / `AUTHCTL_TOKEN`.
+Flags: `-addr` (default `localhost:9403`), `-token` / `AUTHCTL_TOKEN`. The token
+is sent as `x-auth-token`; an API key (`mct_...`) is first exchanged for a
+short-lived session. `rm` requires an admin token (see below).
 
 ### Administrative session RPCs
 
@@ -182,6 +188,65 @@ for a retry. Successful validation returns the user's current ID, username,
 roles and tenant, including empty roles/tenant after a claims change. The lookup
 does not read password hashes or decrypt TOTP secrets. Only definitively expired
 sessions receive best-effort lazy cleanup; unreadable records are preserved.
+
+### User erasure (ADR-0035)
+
+`DeleteUser` (gRPC) and `DELETE /api/users/{id}` (HTTP) erase a user. Both
+require a current, fully authenticated end-user **admin bearer** (`full` or
+`api-token` session in `x-auth-token`, role rechecked on every call as for the
+administrative session RPCs); a verified mesh certificate alone is refused for
+this method. The target must be in the caller's tenant (empty = the single
+household; another tenant's id is `NotFound`), self-deletion and deleting the
+last `admin` of the tenant are refused (`FailedPrecondition` / HTTP 400).
+
+One SQLite write transaction (`BEGIN IMMEDIATE`, so the last-admin count cannot
+race a concurrent erasure in this or another process) deletes the user, every
+session (full, partial, api-token), API tokens, passkeys, passkey sessions and
+TOTP rows, revokes the user's unredeemed invites and replaces their
+`created_by` with `deleted-user`, and inserts the tombstone
+`user_erasures(erasure_id, user_id, tenant_id, deleted_at, deleted_by)`. The
+erasure id is random and opaque; the tombstone has no username and is never
+pruned. The response carries `erasure_id`; repeating the call for an erased id
+returns the same id, an unknown id is `NotFound`.
+
+The tombstone wins: on every start auth-local deletes any user, credential,
+session or token row whose id is tombstoned (e.g. restored from an older
+archive), and a tombstoned id can never be created again (user creation,
+invite redemption, sessions, tokens, TOTP and passkeys all refuse it).
+Usernames are reusable and get a new, unrelated id.
+
+Ledger RPCs for personal-data owners (core `muxcore/auth/v1`, served to the
+`sdk/go/module/erasure` reconciler):
+
+| RPC | Caller | Notes |
+|-----|--------|-------|
+| `ListUserErasures` | verified mesh client certificate whose CN is on `AUTH_ERASURE_CONSUMERS` | Whole ledger, every tenant, ordered by `deleted_at` then `erasure_id`; pages default 100, max 500; continuations are encrypted and authenticated. `acknowledged_by_caller` is true when the caller's latest ack is `OK` |
+| `AckUserErasure` | same | The acknowledging module is the verified CN (`x-caller-id` is ignored on TLS connections). Outcome `OK`/`FAILED`/`UNSUPPORTED`; `detail_code` and count keys match `[a-z0-9_.-]{1,64}`; at most 32 non-negative counts. The latest ack per (erasure, module) wins; repeats are idempotent. Unknown erasure: `NotFound` |
+| `GetUserErasureStatus` | admin bearer (as `DeleteUser`) | Caller's tenant only. Per erasure: every required module (pending = `UNSPECIFIED`), then any other module that acknowledged; `complete` when every `AUTH_ERASURE_REQUIRED` module's latest ack is `OK`. `pending_only` filter and paging (continuations bound to the filter) |
+
+A user bearer never authorizes the ledger: without a verified certificate the
+call is `Unauthenticated`; with an allowlisted certificate plus a bearer it is
+`PermissionDenied`. Only with `MUXCORE_INSECURE_DISABLE_TLS`/`MUXCORE_GRPC_INSECURE`
+(plaintext dev listener) and `MUXCORE_PROFILE` other than `household`/`staging`
+does a plaintext caller's `x-caller-id` stand in for the CN (ADR-0017 §2), still
+subject to the allowlist.
+
+**Restore (ADR-0035 §4).** Backups are not rewritten. Before replacing
+auth-local's database with an archive, with auth-local **stopped**, export the
+live ledger; restore; import it; then start auth-local:
+
+```
+authctl erasures export -db /data/auth.db /safe/place/ledger.json   # file mode 0600, refuses to overwrite
+# ... restore the archive over /data/auth.db ...
+authctl erasures import -db /data/auth.db /safe/place/ledger.json
+```
+
+Import is idempotent, refuses a tombstone whose `erasure_id` or `user_id`
+already appears paired differently (nothing is imported), and deletes the
+restored rows of every tombstoned user. auth-local has no database lock file, so
+both commands rely on the operator stopping auth-local first. With no live
+system, use the newest auth-local archive, never one older than any other
+restored module.
 
 ## Implementation
 

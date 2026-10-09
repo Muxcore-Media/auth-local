@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- User erasure (ADR-0035 §1, NFR-DATA-003). gRPC `DeleteUser` now requires a current, fully authenticated end-user **admin bearer** in `x-auth-token` (ADR-0026 §2 recheck); the mesh-peer bypass is removed for this method only (other admin methods keep it). Self-deletion and deleting the last admin of the tenant return `FailedPrecondition`; a target outside the caller's tenant returns `NotFound`; errors are gRPC status codes instead of `DeleteUserResponse.error`. HTTP `DELETE /api/users/{id}` runs the same store erasure. The last-admin count is now taken inside the delete's `BEGIN IMMEDIATE` write transaction, closing a race where two concurrent deletes of the last two admins could both succeed.
+- Erasure now also deletes `totp` and `webauthn_sessions` rows (previously left behind), revokes the user's unredeemed invites and anonymises their `created_by` to `deleted-user`, and records a tombstone (`user_erasures`: random erasure id, user id, tenant, time, deleting admin id; no username). `DeleteUserResponse.erasure_id` returns it; repeating the deletion returns the same id.
+- "The tombstone wins": every start deletes user, credential, session and token rows of tombstoned ids (restored archives), and a tombstoned id can never be created again (users, invite redemption, sessions, API tokens, TOTP, passkeys).
+
+### Added
+- Erasure ledger RPCs from core v0.6.17: `ListUserErasures` and `AckUserErasure` admit only a verified mesh client certificate whose CN is on `AUTH_ERASURE_CONSUMERS` (empty/unset fails closed; user bearers refused; the acknowledging module is the verified CN), `GetUserErasureStatus` (admin bearer) reports per-module status and completion against `AUTH_ERASURE_REQUIRED`. Paged with encrypted continuations.
+- `authctl erasures export|import` for the offline restore flow (ADR-0035 §4); run while auth-local is stopped.
+- `authctl` now sends `-token`/`AUTHCTL_TOKEN` as `x-auth-token` (API keys are exchanged for a session first); `authctl rm` needs an admin token.
+- Upgrade snapshot from v0.1.19 (`internal/store/testdata/upgrade/v0.1.19.db`): pre-`session_id`, pre-ledger schema; opened twice, then erased and reopened.
+
+### Changed
+- Built on core v0.6.17 / sdk/go/module v0.6.7. The store's non-tombstoning `DeleteUser` is removed in favour of `EraseUser`.
+
+
 ## [0.1.19] - 2026-10-05
 
 
