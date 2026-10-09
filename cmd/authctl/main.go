@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
 
@@ -21,7 +23,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  adduser <username>      Create user (prompts for password)\n")
 		fmt.Fprintf(os.Stderr, "  passwd <username>       Change user password\n")
-		fmt.Fprintf(os.Stderr, "  rm <username>           Delete user\n")
+		fmt.Fprintf(os.Stderr, "  rm <username>           Erase user (needs an admin -token)\n")
 		fmt.Fprintf(os.Stderr, "  list                    List all users\n")
 		fmt.Fprintf(os.Stderr, "  addrole <user> <role>   Assign role to user\n")
 		fmt.Fprintf(os.Stderr, "  rmrole <user> <role>    Remove role from user\n")
@@ -31,6 +33,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  token create <user> <name>  Create API token\n")
 		fmt.Fprintf(os.Stderr, "  token list <user>       List API tokens\n")
 		fmt.Fprintf(os.Stderr, "  token rm <token-id>     Delete API token\n")
+		fmt.Fprintf(os.Stderr, "  erasures export [-db <auth.db>] <ledger.json>  Export the erasure ledger (offline)\n")
+		fmt.Fprintf(os.Stderr, "  erasures import [-db <auth.db>] <ledger.json>  Import the ledger after a restore (offline)\n")
 		fmt.Fprintf(os.Stderr, "\nFlags:\n")
 		flag.PrintDefaults()
 	}
@@ -42,6 +46,10 @@ func main() {
 	if flag.NArg() < 1 {
 		flag.Usage()
 		os.Exit(1)
+	}
+	if flag.Arg(0) == "erasures" {
+		// Offline: operates on the database file, never over gRPC.
+		os.Exit(runErasures(flag.Args()[1:], os.Stdout, os.Stderr))
 	}
 
 	dialOpts, err := grpctls.ClientDialOptions()
@@ -57,7 +65,11 @@ func main() {
 	defer func() { _ = conn.Close() }()
 
 	client := authv1.NewAuthServiceClient(conn)
-	ctx := context.Background()
+	ctx, err := bearerContext(context.Background(), client, *adminToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin token: %v\n", err)
+		os.Exit(1)
+	}
 
 	switch flag.Arg(0) {
 	case "adduser":
@@ -178,7 +190,7 @@ func cmdDeleteUser(ctx context.Context, client authv1.AuthServiceClient, args []
 		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
 		os.Exit(1)
 	}
-	fmt.Printf("user %q deleted\n", args[0])
+	fmt.Printf("user %q erased (erasure %s)\n", args[0], resp.GetErasureId())
 }
 
 func cmdListUsers(ctx context.Context, client authv1.AuthServiceClient, adminToken string) {
@@ -401,6 +413,32 @@ func cmdToken(ctx context.Context, client authv1.AuthServiceClient, args []strin
 		fmt.Fprintf(os.Stderr, "usage: authctl token create|list|rm ...\n")
 		os.Exit(1)
 	}
+}
+
+// bearerContext attaches the admin credential as x-auth-token. An API key
+// (mct_...) is first exchanged for a short-lived api-token session, since
+// x-auth-token carries session bearers. DeleteUser requires it: a mesh
+// certificate alone never authorizes an erasure (ADR-0035 §1).
+func bearerContext(ctx context.Context, client authv1.AuthServiceClient, token string) (context.Context, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ctx, nil
+	}
+	if strings.HasPrefix(token, "mct_") {
+		data, err := json.Marshal(map[string]string{"key": token})
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Authenticate(ctx, &authv1.AuthenticateRequest{CredentialType: "api-key", CredentialData: data})
+		if err != nil {
+			return nil, err
+		}
+		if !resp.GetAuthenticated() {
+			return nil, fmt.Errorf("API key rejected: %s", resp.GetError())
+		}
+		token = resp.GetSessionToken()
+	}
+	return metadata.AppendToOutgoingContext(ctx, "x-auth-token", token), nil
 }
 
 func init() {
