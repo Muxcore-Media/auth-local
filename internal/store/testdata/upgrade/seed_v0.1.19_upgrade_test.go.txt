@@ -1,0 +1,102 @@
+//go:build upgradeseed
+
+package store
+
+import (
+	"encoding/hex"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+// upgradeSeedKey is the fake AUTH_SECRET_KEY the v0.1.19 snapshot was written
+// with (hex). It must match upgradeKeyV0119 in upgrade_test.go.
+const upgradeSeedKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+// TestUpgradeSeed seeds a database at $UPGRADE_SEED_DB using this tag's store
+// and writes its schema to $UPGRADE_SEED_SCHEMA.
+func TestUpgradeSeed(t *testing.T) {
+	path := os.Getenv("UPGRADE_SEED_DB")
+	if path == "" {
+		t.Skip("UPGRADE_SEED_DB not set")
+	}
+	key, _ := hex.DecodeString(upgradeSeedKey)
+	s, err := NewWithKey(path, key)
+	must(t, err)
+	mk := func(name, pw, tenant string, roles ...string) *User {
+		u, err := s.CreateUserTenant(name, pw, tenant)
+		must(t, err)
+		if len(roles) > 0 {
+			must(t, s.SetRoles(u.ID, roles))
+		}
+		return u
+	}
+	alice := mk("alice", "alice-password-1", "", "admin", "user")
+	bob := mk("bob", "bob-password-2", "")
+	carol := mk("carol", "carol-password-3", "household-2", "admin")
+	mk("dave", "dave-password-4", "household-2")
+
+	// Sessions with known raw tokens (stored hashed), far-future expiry.
+	for _, c := range []struct{ raw, id, kind string }{
+		{"seed119-full-alice", alice.ID, "full"},
+		{"seed119-partial-bob", bob.ID, "partial"},
+		{"seed119-api-bob", bob.ID, "api-token"},
+		{"seed119-full-bob", bob.ID, "full"},
+		{"seed119-full-carol", carol.ID, "full"},
+	} {
+		_, err := s.db.Exec(`INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, '2099-01-01T00:00:00Z')`,
+			hashSessionToken(c.raw), c.id, c.kind)
+		must(t, err)
+	}
+	_, err = s.db.Exec(`INSERT INTO api_tokens (id, user_id, name, token_hash, prefix, scopes) VALUES
+		('tok119-bob', ?, 'bob-cli', ?, 'mct_seed119b', '["read"]'),
+		('tok119-alice', ?, 'alice-cli', ?, 'mct_seed119a', '["read","write"]')`,
+		bob.ID, sha256Hex("mct_seed119_bob_000000000000000000"), alice.ID, sha256Hex("mct_seed119_alice_00000000000000000"))
+	must(t, err)
+	must(t, s.SetTOTPSecret(bob.ID, "KRSXG5CTMVRXEZLU"))
+	must(t, s.VerifyTOTPSetup(bob.ID))
+	must(t, s.AddWebAuthnCredential(bob.ID, []byte("seed119-passkey-bob")))
+	must(t, s.AddWebAuthnCredential(alice.ID, []byte("seed119-passkey-alice")))
+	_, err = s.db.Exec(`INSERT INTO webauthn_sessions (challenge, user_id, data, expires_at) VALUES
+		('seed119-challenge-bob', ?, x'0a0b', '2099-01-01 00:00:00'),
+		('seed119-challenge-alice', ?, x'0c0d', '2099-01-01 00:00:00')`, bob.ID, alice.ID)
+	must(t, err)
+
+	// Invites: created_by holds a username (webapp) for alice and bob.
+	_, err = s.CreateInvite("alice", "user", "", 1, 1000*24*time.Hour)
+	must(t, err)
+	_, err = s.CreateInvite("bob", "user", "", 0, 1000*24*time.Hour) // unlimited, unredeemed
+	must(t, err)
+	used, err := s.CreateInvite("bob", "user", "", 1, 1000*24*time.Hour)
+	must(t, err)
+	_, _, err = s.RedeemInvite(used.Token, "erin", "erin-password-5") // exhausted
+	must(t, err)
+
+	_, err = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	must(t, err)
+	_, err = s.db.Exec(`PRAGMA journal_mode=DELETE`)
+	must(t, err)
+	_, err = s.db.Exec(`VACUUM`)
+	must(t, err)
+	if out := os.Getenv("UPGRADE_SEED_SCHEMA"); out != "" {
+		rows, err := s.db.Query(`SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type DESC, name`)
+		must(t, err)
+		var b strings.Builder
+		for rows.Next() {
+			var q string
+			must(t, rows.Scan(&q))
+			b.WriteString(q + ";\n")
+		}
+		must(t, rows.Close())
+		must(t, os.WriteFile(out, []byte(b.String()), 0o600))
+	}
+	must(t, s.Close())
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}

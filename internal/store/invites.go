@@ -194,12 +194,15 @@ func (s *Store) RedeemInvite(rawToken, username, password string) (*User, *Invit
 	userID := newID()
 	roles := []string{inv.Role}
 	rolesJSON, _ := json.Marshal(roles)
-	_, err = tx.Exec(
-		`INSERT INTO users (id, username, password, roles, tenant_id) VALUES (?, ?, ?, ?, ?)`,
-		userID, username, string(pwHash), string(rolesJSON), inv.TenantID,
+	res, err := tx.Exec(
+		`INSERT INTO users (id, username, password, roles, tenant_id) SELECT ?, ?, ?, ?, ?`+notErasedClause,
+		userID, username, string(pwHash), string(rolesJSON), inv.TenantID, userID,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create user: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, nil, ErrUserIDErased
 	}
 	_, err = tx.Exec(`UPDATE invites SET use_count = use_count + 1 WHERE id = ?`, inv.ID)
 	if err != nil {

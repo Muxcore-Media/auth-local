@@ -114,3 +114,73 @@ func TestUsersAPIRejectsSelfDeleteAndLastAdmin(t *testing.T) {
 		t.Fatalf("demote %d %s", demoteW.Code, demoteW.Body.String())
 	}
 }
+
+// TestUsersAPIDeleteIsErasure: HTTP DELETE runs the same ADR-0035 erasure as
+// gRPC DeleteUser: admin only, tenant-scoped, idempotent with the same
+// erasure id, and every bearer of the user stops working.
+func TestUsersAPIDeleteIsErasure(t *testing.T) {
+	h, srv, st := newInviteTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	auth := adminAuthHeader(t, st)
+	member, err := st.CreateUser("pat", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberSess, err := st.CreateFullSession(member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := st.CreateUserTenant("far", "password123", "household-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	del := func(id, authz string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodDelete, "/api/users/"+id, nil)
+		if authz != "" {
+			req.Header.Set("Authorization", authz)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	if w := del(member.ID, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous delete %d", w.Code)
+	}
+	if w := del(foreign.ID, "Bearer "+memberSess.Token); w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin delete %d", w.Code)
+	}
+	if w := del(foreign.ID, auth); w.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant delete %d %s", w.Code, w.Body.String())
+	}
+	if _, err := st.GetUser(foreign.ID); err != nil {
+		t.Fatal("cross-tenant target deleted")
+	}
+	if w := del("never-seen", auth); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown delete %d", w.Code)
+	}
+
+	w := del(member.ID, auth)
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Removed   bool   `json:"removed"`
+		ErasureID string `json:"erasure_id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil || !body.Removed || body.ErasureID == "" {
+		t.Fatalf("delete body = %+v, %v", body, err)
+	}
+	probe := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	probe.Header.Set("Authorization", "Bearer "+memberSess.Token)
+	if srv.AuthenticateHTTPRequest(probe) {
+		t.Fatal("erased user's bearer still authenticates")
+	}
+	w = del(member.ID, auth)
+	var again struct {
+		ErasureID string `json:"erasure_id"`
+	}
+	if w.Code != http.StatusOK || json.NewDecoder(w.Body).Decode(&again) != nil || again.ErasureID != body.ErasureID {
+		t.Fatalf("repeat delete %d %+v; want the same erasure id", w.Code, again)
+	}
+}

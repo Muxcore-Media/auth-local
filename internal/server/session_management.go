@@ -15,21 +15,29 @@ import (
 // requireSessionAdmin intentionally differs from requireAdmin: these RPCs
 // require an end-user bearer even when the transport has a verified mesh peer.
 func (s *AuthServer) requireSessionAdmin(ctx context.Context) error {
+	_, err := s.requireSessionAdminIdentity(ctx)
+	return err
+}
+
+// requireSessionAdminIdentity is the ADR-0026 §2 check (a current, fully
+// authenticated end-user bearer in x-auth-token whose user currently holds
+// admin; no mesh-peer fallback) returning the verified administrator.
+func (s *AuthServer) requireSessionAdminIdentity(ctx context.Context) (*authStore.SessionIdentity, error) {
 	token := sessionTokenFromContext(ctx)
 	if token == "" {
-		return status.Error(codes.Unauthenticated, "missing auth token")
+		return nil, status.Error(codes.Unauthenticated, "missing auth token")
 	}
-	roles, err := s.store.SessionAdminRoles(ctx, token)
+	identity, err := s.store.ValidateSession(ctx, token)
 	if errors.Is(err, authStore.ErrInvalidSession) {
-		return status.Error(codes.Unauthenticated, "invalid or expired session")
+		return nil, status.Error(codes.Unauthenticated, "invalid or expired session")
 	}
 	if err != nil {
-		return sessionManagementError(err, "session authentication failed")
+		return nil, sessionManagementError(err, "session authentication failed")
 	}
-	if !hasRole(roles, "admin") {
-		return status.Error(codes.PermissionDenied, "admin role required")
+	if !hasRole(identity.Roles, "admin") {
+		return nil, status.Error(codes.PermissionDenied, "admin role required")
 	}
-	return nil
+	return identity, nil
 }
 
 func (s *AuthServer) ListSessions(ctx context.Context, req *authv1.ListSessionsRequest) (*authv1.ListSessionsResponse, error) {

@@ -2,6 +2,8 @@ package webapp
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -167,29 +169,24 @@ func (h *Handler) apiUserAction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case http.MethodDelete:
-		if caller.ID == id {
-			http.Error(w, "cannot delete your own account", http.StatusBadRequest)
+		// ADR-0035 §1: the same erasure as gRPC DeleteUser — tenant, self and
+		// last-admin checks run inside the store's write transaction.
+		erasureID, eraseErr := h.store.EraseUser(r.Context(), caller.ID, caller.TenantID, id)
+		switch {
+		case eraseErr == nil:
+		case errors.Is(eraseErr, authStore.ErrUserNotFound):
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		case errors.Is(eraseErr, authStore.ErrSelfErasure), errors.Is(eraseErr, authStore.ErrLastAdmin):
+			http.Error(w, eraseErr.Error(), http.StatusBadRequest)
+			return
+		default:
+			slog.Error("user erasure failed", "error", eraseErr)
+			http.Error(w, "user erasure failed", http.StatusInternalServerError)
 			return
 		}
-		target, getErr := h.store.GetUser(id)
-		if getErr != nil {
-			http.Error(w, getErr.Error(), http.StatusNotFound)
-			return
-		}
-		users, listErr := h.store.ListUsers()
-		if listErr != nil {
-			http.Error(w, listErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		if userHasAdmin(target) && countAdmins(users) <= 1 {
-			http.Error(w, "cannot delete the last admin", http.StatusBadRequest)
-			return
-		}
-		if delErr := h.store.DeleteUser(id); delErr != nil {
-			http.Error(w, delErr.Error(), http.StatusBadRequest)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"removed": true, "id": id})
+		slog.Info("user erased", "erasure_id", erasureID, "by", caller.ID)
+		_ = json.NewEncoder(w).Encode(map[string]any{"removed": true, "id": id, "erasure_id": erasureID})
 	case http.MethodPatch, http.MethodPost:
 		var body struct {
 			Role  string   `json:"role"`
