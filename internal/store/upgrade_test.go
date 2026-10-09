@@ -1,6 +1,9 @@
 package store
 
 import (
+	"context"
+	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -185,12 +188,138 @@ func checkUpgraded(t *testing.T, s *Store, freshSchema moduletest.SchemaInfo, fi
 	if err != nil || u.TenantID != "" {
 		t.Fatalf("RedeemInvite = %+v, %v", u, err)
 	}
-	// Leave the fixture copy as found for the second pass: remove what we added.
-	if err := s.DeleteUser(u.ID); err != nil {
-		t.Fatalf("DeleteUser: %v", err)
+	// Leave the fixture copy as found for the second pass: erase what we added
+	// (the tombstone stays; the second pass redeems "dave" again with a new id).
+	if _, err := s.EraseUser(context.Background(), alice.ID, "", u.ID); err != nil {
+		t.Fatalf("EraseUser: %v", err)
 	}
 	if _, err := s.db.Exec(`DELETE FROM invites`); err != nil {
 		t.Fatalf("cleanup invites: %v", err)
 	}
 	moduletest.RequireIntegrity(t, s.db)
+}
+
+// upgradeKeyV0119 is the fake secret key the v0.1.19 snapshot was written with
+// (testdata/upgrade/seed_v0.1.19_upgrade_test.go.txt).
+const upgradeKeyV0119 = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+// TestUpgradeFromV0_1_19 opens the snapshot produced by the latest release,
+// v0.1.19 (no session_id column, no erasure ledger), with the current code
+// twice, then erases a user on the upgraded database and reopens it
+// (ADR-0015, ADR-0035).
+func TestUpgradeFromV0_1_19(t *testing.T) {
+	key, err := hex.DecodeString(upgradeKeyV0119)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := NewWithKey(filepath.Join(t.TempDir(), "fresh.db"), key)
+	if err != nil {
+		t.Fatalf("open fresh: %v", err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	freshSchema := moduletest.Schema(t, fresh.db)
+
+	path := moduletest.CopyFixture(t, "testdata/upgrade/v0.1.19.db")
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		s, err := NewWithKey(path, key)
+		if err != nil {
+			t.Fatalf("open #%d: %v", i+1, err)
+		}
+		moduletest.RequireSchemaSuperset(t, moduletest.Schema(t, s.db), freshSchema)
+		moduletest.RequireIntegrity(t, s.db)
+		users, err := s.ListUsers()
+		if err != nil || len(users) != 5 {
+			t.Fatalf("ListUsers = %d, %v; want 5", len(users), err)
+		}
+		for _, tok := range []string{"seed119-full-alice", "seed119-api-bob", "seed119-full-bob", "seed119-full-carol"} {
+			if _, err := s.ValidateSession(ctx, tok); err != nil {
+				t.Errorf("ValidateSession(%s) after upgrade: %v", tok, err)
+			}
+		}
+		var missingIDs int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE session_id IS NULL OR session_id = ''`).Scan(&missingIDs); err != nil || missingIDs != 0 {
+			t.Errorf("sessions without session_id = %d, %v", missingIDs, err)
+		}
+		if secret, enabled, err := s.GetTOTPSecret(mustUser(t, s, "bob").ID); err != nil || secret != "KRSXG5CTMVRXEZLU" || !enabled {
+			t.Errorf("bob totp = %q, %v, %v", secret, enabled, err)
+		}
+		entries, next, err := s.ListErasures(ctx, "m", 0, "")
+		if err != nil || len(entries) != 0 || next != "" {
+			t.Fatalf("ledger after upgrade = %v, %q, %v; want empty", entries, next, err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Erase bob on the upgraded database.
+	s, err := NewWithKey(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, bob := mustUser(t, s, "alice"), mustUser(t, s, "bob")
+	erasureID, err := s.EraseUser(ctx, alice.ID, "", bob.ID)
+	if err != nil {
+		t.Fatalf("EraseUser(bob): %v", err)
+	}
+	requireNoUserRows(t, s, bob.ID)
+	for _, tok := range []string{"seed119-api-bob", "seed119-full-bob"} {
+		if _, err := s.ValidateSession(ctx, tok); !errors.Is(err, ErrInvalidSession) {
+			t.Errorf("ValidateSession(%s) after erasure = %v, want ErrInvalidSession", tok, err)
+		}
+	}
+	if _, err := s.ValidateAPIToken("mct_seed119_bob_000000000000000000"); err == nil {
+		t.Error("bob's API token still validates after erasure")
+	}
+	if _, err := s.ValidateAPIToken("mct_seed119_alice_00000000000000000"); err != nil {
+		t.Errorf("bystander alice's API token: %v", err)
+	}
+	invites, err := s.ListInvites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var byBob, revoked, aliceInv int
+	for _, inv := range invites {
+		switch inv.CreatedBy {
+		case "bob":
+			byBob++
+		case DeletedUserMarker:
+			if !inv.RevokedAt.IsZero() {
+				revoked++
+			}
+		case "alice":
+			aliceInv++
+			if !inv.RevokedAt.IsZero() {
+				t.Error("bystander alice's invite was revoked")
+			}
+		}
+	}
+	// Bob's unlimited invite is revoked; his exhausted one is only anonymised.
+	if byBob != 0 || revoked != 1 || aliceInv != 1 {
+		t.Errorf("invites: by bob=%d, anonymised+revoked=%d, alice=%d; want 0, 1, 1", byBob, revoked, aliceInv)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = NewWithKey(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	entries, _, err := s.ListErasures(ctx, "m", 0, "")
+	if err != nil || len(entries) != 1 || entries[0].ErasureID != erasureID || entries[0].UserID != bob.ID {
+		t.Fatalf("ledger after reopen = %+v, %v", entries, err)
+	}
+	moduletest.RequireIntegrity(t, s.db)
+}
+
+func mustUser(t *testing.T, s *Store, username string) *User {
+	t.Helper()
+	u, err := s.GetUserByUsername(username)
+	if err != nil {
+		t.Fatalf("user %s: %v", username, err)
+	}
+	return u
 }
