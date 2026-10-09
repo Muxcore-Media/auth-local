@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -12,13 +13,27 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
-const bcryptCost = 12
+// bcryptCost is the password hashing cost. Only test binaries may lower it
+// (SetPasswordHashCostForTesting); production always uses 12.
+var bcryptCost = 12
+
+// SetPasswordHashCostForTesting lowers the bcrypt cost so tests that create
+// many users finish under the race detector. It panics outside a test binary,
+// so it can never weaken production hashing. Call it from TestMain only.
+func SetPasswordHashCostForTesting(cost int) {
+	if !testing.Testing() {
+		panic("store: SetPasswordHashCostForTesting called outside a test binary")
+	}
+	bcryptCost = max(cost, bcrypt.MinCost)
+}
+
 const sessionTTL = 24 * time.Hour
 
 // User represents a user in the local auth store.
@@ -107,6 +122,13 @@ func NewWithKey(path string, key []byte) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// ADR-0035 §4: the tombstone wins over restored rows.
+	swept, err := s.SweepTombstoned(context.Background())
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("erasure sweep: %w", err)
+	}
+	logSweep(swept)
 	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("chmod db: %w", err)
 	}
@@ -181,6 +203,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateTenantColumns(); err != nil {
 		return err
 	}
+	if err := s.migrateErasures(); err != nil {
+		return err
+	}
 	return s.migrateSessionIDs()
 }
 
@@ -231,12 +256,15 @@ func (s *Store) CreateUserTenant(username, password, tenantID string) (*User, er
 		TenantID: tenantID,
 	}
 	rolesJSON, _ := json.Marshal(user.Roles)
-	_, err = s.db.Exec(
-		`INSERT INTO users (id, username, password, roles, tenant_id) VALUES (?, ?, ?, ?, ?)`,
-		id, username, string(hash), string(rolesJSON), tenantID,
+	res, err := s.db.Exec(
+		`INSERT INTO users (id, username, password, roles, tenant_id) SELECT ?, ?, ?, ?, ?`+notErasedClause,
+		id, username, string(hash), string(rolesJSON), tenantID, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrUserIDErased
 	}
 	return user, nil
 }
@@ -306,34 +334,6 @@ func (s *Store) SetTenantID(id, tenantID string) error {
 	return err
 }
 
-func (s *Store) DeleteUser(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM api_tokens WHERE user_id = ?`, id); err != nil {
-		return err
-	}
-	result, err := tx.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("user not found")
-	}
-	return tx.Commit()
-}
-
 func (s *Store) SetPassword(id, password string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
@@ -370,12 +370,15 @@ func (s *Store) CreateAPIToken(userID, name string, scopes []string) (string, *A
 	id := newID()
 	scopesJSON, _ := json.Marshal(scopes)
 
-	_, err := s.db.Exec(
-		`INSERT INTO api_tokens (id, user_id, name, token_hash, prefix, scopes) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, userID, name, hash, prefix, string(scopesJSON),
+	res, err := s.db.Exec(
+		`INSERT INTO api_tokens (id, user_id, name, token_hash, prefix, scopes) SELECT ?, ?, ?, ?, ?, ?`+notErasedClause,
+		id, userID, name, hash, prefix, string(scopesJSON), userID,
 	)
 	if err != nil {
 		return "", nil, fmt.Errorf("create token: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", nil, ErrUserIDErased
 	}
 
 	return raw, &APITokenInfo{
@@ -473,12 +476,15 @@ func (s *Store) CreateSession(userID, kind string, ttl time.Duration) (*Session,
 		return nil, fmt.Errorf("create session ID: %w", err)
 	}
 	expiresAt := time.Now().Add(ttl)
-	_, err = s.db.Exec(
-		`INSERT INTO sessions (token, session_id, user_id, kind, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		hashSessionToken(token), sessionID, userID, kind, expiresAt.Format(time.RFC3339),
+	res, err := s.db.Exec(
+		`INSERT INTO sessions (token, session_id, user_id, kind, expires_at) SELECT ?, ?, ?, ?, ?`+notErasedClause,
+		hashSessionToken(token), sessionID, userID, kind, expiresAt.Format(time.RFC3339), userID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrUserIDErased
 	}
 	return &Session{Token: token, UserID: userID, Kind: kind, ExpiresAt: expiresAt}, nil
 }
@@ -545,11 +551,17 @@ func (s *Store) SetTOTPSecret(userID, secret string) error {
 	if err != nil {
 		return fmt.Errorf("encrypt totp secret: %w", err)
 	}
-	_, err = s.db.Exec(
-		`INSERT OR REPLACE INTO totp (user_id, secret, enabled, created_at) VALUES (?, ?, 1, datetime('now'))`,
-		userID, enc,
+	res, err := s.db.Exec(
+		`INSERT OR REPLACE INTO totp (user_id, secret, enabled, created_at) SELECT ?, ?, 1, datetime('now')`+notErasedClause,
+		userID, enc, userID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUserIDErased
+	}
+	return nil
 }
 
 func (s *Store) GetTOTPSecret(userID string) (string, bool, error) {
@@ -593,12 +605,18 @@ type WebAuthnSessionData struct {
 }
 
 func (s *Store) SaveWebAuthnSession(userID, challenge string, data []byte) error {
-	_, err := s.db.Exec(
-		`INSERT INTO webauthn_sessions (challenge, user_id, data, expires_at) VALUES (?, ?, ?, datetime('now', '+5 minutes'))
+	res, err := s.db.Exec(
+		`INSERT INTO webauthn_sessions (challenge, user_id, data, expires_at) SELECT ?, ?, ?, datetime('now', '+5 minutes')`+notErasedClause+`
 		 ON CONFLICT(challenge) DO UPDATE SET data = excluded.data`,
-		challenge, userID, data,
+		challenge, userID, data, userID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUserIDErased
+	}
+	return nil
 }
 
 func (s *Store) GetWebAuthnSession(challenge string) ([]byte, error) {
@@ -621,10 +639,15 @@ func (s *Store) DeleteWebAuthnSession(challenge string) error {
 func (s *Store) AddWebAuthnCredential(userID string, data []byte) error {
 	// Generate a unique ID for the credential row using SHA-256 of the data.
 	id := sha256.Sum256(data)
+	if erased, err := s.IsErased(context.Background(), userID); err != nil {
+		return err
+	} else if erased {
+		return ErrUserIDErased
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO webauthn_credentials (id, user_id, public_key, created_at) VALUES (?, ?, ?, datetime('now'))
+		`INSERT INTO webauthn_credentials (id, user_id, public_key, created_at) SELECT ?, ?, ?, datetime('now')`+notErasedClause+`
 		 ON CONFLICT(id) DO NOTHING`,
-		hex.EncodeToString(id[:]), userID, data,
+		hex.EncodeToString(id[:]), userID, data, userID,
 	)
 	return err
 }
@@ -728,7 +751,9 @@ func newSessionToken() string {
 	return hex.EncodeToString(h[:])
 }
 
-func newID() string {
+// newID returns a random 128-bit hex id. It is a variable only so tests can
+// force a collision with a tombstoned id.
+var newID = func() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)

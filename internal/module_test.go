@@ -252,3 +252,30 @@ func TestDBPathUsed(t *testing.T) {
 		t.Fatalf("expected db at %s: %v", dbPath, err)
 	}
 }
+
+func TestErasureConfigFromEnv(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	cfg := erasureConfigFromEnv(env(map[string]string{
+		"AUTH_ERASURE_CONSUMERS": "userdata-local, request-media,,",
+		"AUTH_ERASURE_REQUIRED":  "userdata-local",
+	}))
+	if strings.Join(cfg.Consumers, ",") != "userdata-local,request-media" || strings.Join(cfg.Required, ",") != "userdata-local" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	if empty := erasureConfigFromEnv(env(nil)); len(empty.Consumers) != 0 || len(empty.Required) != 0 {
+		t.Fatalf("unset env = %+v; want no consumers (fail closed)", empty)
+	}
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
+	if !erasureConfigFromEnv(env(nil)).TrustCallerIDWithoutTLS {
+		t.Fatal("dev insecure listener should trust x-caller-id on plaintext")
+	}
+	for _, profile := range []string{"household", "staging", " Household "} {
+		if erasureConfigFromEnv(env(map[string]string{"MUXCORE_PROFILE": profile})).TrustCallerIDWithoutTLS {
+			t.Fatalf("profile %q must never trust x-caller-id", profile)
+		}
+	}
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "")
+	if erasureConfigFromEnv(env(nil)).TrustCallerIDWithoutTLS {
+		t.Fatal("TLS listener must not trust x-caller-id")
+	}
+}

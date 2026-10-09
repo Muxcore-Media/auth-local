@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,19 +102,23 @@ func TestListUsers(t *testing.T) {
 	}
 }
 
-func TestDeleteUser(t *testing.T) {
+func TestEraseUserBasic(t *testing.T) {
 	s := newTestStore(t)
+	admin, _ := s.CreateUser("root", "pw")
+	if err := s.SetRoles(admin.ID, []string{"admin"}); err != nil {
+		t.Fatal(err)
+	}
 	user, _ := s.CreateUser("alice", "pw")
-	if err := s.DeleteUser(user.ID); err != nil {
-		t.Fatalf("DeleteUser: %v", err)
+	if _, err := s.EraseUser(context.Background(), admin.ID, "", user.ID); err != nil {
+		t.Fatalf("EraseUser: %v", err)
 	}
 	_, err := s.GetUser(user.ID)
 	if err == nil {
-		t.Fatal("expected error after delete")
+		t.Fatal("expected error after erase")
 	}
 
-	if err := s.DeleteUser("nonexistent"); err == nil {
-		t.Fatal("expected error deleting nonexistent user")
+	if _, err := s.EraseUser(context.Background(), admin.ID, "", "nonexistent"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("erasing a nonexistent user = %v, want ErrUserNotFound", err)
 	}
 }
 

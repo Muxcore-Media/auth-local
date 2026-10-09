@@ -189,6 +189,7 @@ func (m *Module) Init(ctx context.Context) error {
 		return err
 	}
 	m.authSrv = server.New(m.store, pol, m.rpID, m.rpOrigins, m.rpName)
+	m.authSrv.SetErasureConfig(erasureConfigFromEnv(os.Getenv))
 
 	m.waHandler, err = webauthn.New(m.rpID, m.rpOrigins, m.rpName, m.store)
 	if err != nil {
@@ -213,6 +214,20 @@ func (m *Module) Init(ctx context.Context) error {
 		"rp_id", m.rpID,
 	)
 	return nil
+}
+
+// erasureConfigFromEnv reads AUTH_ERASURE_CONSUMERS and AUTH_ERASURE_REQUIRED
+// (ADR-0035 §2). x-caller-id is trusted as a ledger caller only on the
+// explicitly insecure dev listener outside the household and staging
+// profiles (ADR-0017 §2).
+func erasureConfigFromEnv(getenv func(string) string) server.ErasureConfig {
+	profile := strings.ToLower(strings.TrimSpace(getenv("MUXCORE_PROFILE")))
+	strict := profile == "household" || profile == "staging"
+	return server.ErasureConfig{
+		Consumers:               server.ParseModuleList(getenv(server.EnvErasureConsumers)),
+		Required:                server.ParseModuleList(getenv(server.EnvErasureRequired)),
+		TrustCallerIDWithoutTLS: grpctls.InsecureAllowed() && !strict,
+	}
 }
 
 func (m *Module) loadPolicy() (*policy.Policy, error) {

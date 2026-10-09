@@ -237,15 +237,3 @@ func (s *Store) RevokeSession(ctx context.Context, userID, sessionID string) err
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND session_id = ?`, userID, sessionID)
 	return err
 }
-
-// SessionAdminRoles loads current roles through a current bearer session. It is
-// separate from mesh authorization and has no fallback to a module identity.
-// ErrInvalidSession covers missing/expired/partial sessions and deleted users;
-// operational errors remain visible to the RPC for Internal status mapping.
-func (s *Store) SessionAdminRoles(ctx context.Context, token string) ([]string, error) {
-	identity, err := s.ValidateSession(ctx, token)
-	if err != nil {
-		return nil, err
-	}
-	return identity.Roles, nil
-}

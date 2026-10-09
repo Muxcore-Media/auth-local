@@ -34,6 +34,7 @@ type AuthServer struct {
 	policy       *policy.Policy
 	loginSuccess atomic.Int64
 	loginFailed  atomic.Int64
+	erasure      erasureState
 	rpID         string
 	rpOrigins    []string
 	rpName       string
@@ -464,17 +465,36 @@ func (s *AuthServer) CreateUser(ctx context.Context, req *authv1.CreateUserReque
 	return &authv1.CreateUserResponse{UserId: user.ID}, nil
 }
 
+// DeleteUser erases a user (ADR-0035 §1). Unlike the other user-management
+// methods it requires a current end-user admin bearer (ADR-0026 §2): a
+// verified mesh certificate alone never authorizes an erasure.
 func (s *AuthServer) DeleteUser(ctx context.Context, req *authv1.DeleteUserRequest) (*authv1.DeleteUserResponse, error) {
-	if err := s.requireAdmin(ctx); err != nil {
-		if st, ok := status.FromError(err); ok {
-			return &authv1.DeleteUserResponse{Error: st.Message()}, nil
-		}
+	caller, err := s.requireSessionAdminIdentity(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.store.DeleteUser(req.UserId); err != nil {
-		return &authv1.DeleteUserResponse{Error: err.Error()}, nil
+	if strings.TrimSpace(req.GetUserId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
-	return &authv1.DeleteUserResponse{}, nil
+	erasureID, err := s.store.EraseUser(ctx, caller.UserID, caller.TenantID, req.GetUserId())
+	if err != nil {
+		return nil, eraseUserError(err)
+	}
+	slog.Info("user erased", "erasure_id", erasureID, "by", caller.UserID)
+	return &authv1.DeleteUserResponse{ErasureId: erasureID}, nil
+}
+
+func eraseUserError(err error) error {
+	switch {
+	case errors.Is(err, authStore.ErrUserNotFound):
+		return status.Error(codes.NotFound, "user not found")
+	case errors.Is(err, authStore.ErrSelfErasure):
+		return status.Error(codes.FailedPrecondition, authStore.ErrSelfErasure.Error())
+	case errors.Is(err, authStore.ErrLastAdmin):
+		return status.Error(codes.FailedPrecondition, authStore.ErrLastAdmin.Error())
+	}
+	slog.Error("user erasure failed", "error", err)
+	return sessionManagementError(err, "user erasure failed")
 }
 
 func (s *AuthServer) ListUsers(ctx context.Context, req *authv1.ListUsersRequest) (*authv1.ListUsersResponse, error) {
