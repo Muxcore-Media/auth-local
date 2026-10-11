@@ -269,11 +269,12 @@ func (h *Handler) apiInvites(w http.ResponseWriter, r *http.Request) {
 		if tenantID == "" {
 			tenantID = strings.TrimSpace(body.Tenant)
 		}
-		createdBy := "admin"
-		if user, err := h.auth.HTTPUser(r); err == nil && user != nil {
-			createdBy = user.Username
+		creator, err := h.auth.HTTPUser(r)
+		if err != nil || creator == nil || creator.ID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-		inv, err := h.store.CreateInvite(createdBy, body.Role, tenantID, maxUses, time.Duration(body.TTLHours)*time.Hour)
+		inv, err := h.store.CreateInviteForUser(r.Context(), creator.ID, body.Role, tenantID, maxUses, time.Duration(body.TTLHours)*time.Hour)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

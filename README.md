@@ -215,6 +215,24 @@ archive), and a tombstoned id can never be created again (user creation,
 invite redemption, sessions, tokens, TOTP and passkeys all refuse it).
 Usernames are reusable and get a new, unrelated id.
 
+Invite creation follows ADR-0036. A supplied gRPC bearer selects end-user
+authority even alongside a verified mesh certificate: it must identify a fully
+authenticated current admin, and a rejected bearer never falls back to module
+authority. Without a bearer, existing verified-module admission and attribution
+remain unchanged. HTTP refuses a failed second user lookup. Both user paths pass
+the immutable creator ID to a write transaction that rechecks existence,
+tombstone absence and the current admin role before inserting the invite. If
+creation commits first, erasure revokes/anonymizes it; if erasure commits first,
+creation refuses, including after the username is reused by a new account.
+
+The literal username `deleted-user` receives the same invite cleanup, including
+startup restore when its tombstoned user row survives. Legacy `created_by` labels
+cannot distinguish a username from an equal module CN, or successive users of
+the same username. Orphaned labels without a surviving user row cannot be safely
+attributed. These cases require operator reconciliation; the sweep does not
+infer provenance or broadly purge unresolved invites. Durable creator-kind/ID
+storage would require a separate migration and compatibility decision.
+
 Ledger RPCs for personal-data owners (core `muxcore/auth/v1`, served to the
 `sdk/go/module/erasure` reconciler):
 

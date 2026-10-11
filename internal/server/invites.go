@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	authv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/auth/v1"
@@ -36,19 +37,26 @@ func inviteInfoFromStore(inv *authStore.Invite) *authv1.InviteInfo {
 	return info
 }
 
-func (s *AuthServer) inviteCreatedBy(ctx context.Context) string {
+// inviteCreator selects user authority whenever a bearer was supplied, even
+// alongside mTLS. An invalid bearer never falls back to module authority.
+func (s *AuthServer) inviteCreator(ctx context.Context) (userID, moduleID string, err error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	if _, supplied := md[authTokenMetadataKey]; supplied {
+		identity, err := s.requireSessionAdminIdentity(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		return identity.UserID, "", nil
+	}
 	if caller, ok := meshCallerFromContext(ctx); ok {
-		return caller
+		return "", caller, nil
 	}
-	user, err := s.callerFromContext(ctx)
-	if err != nil || user == nil {
-		return ""
-	}
-	return user.Username
+	return "", "", status.Error(codes.Unauthenticated, "missing auth token")
 }
 
 func (s *AuthServer) CreateInvite(ctx context.Context, req *authv1.CreateInviteRequest) (*authv1.CreateInviteResponse, error) {
-	if err := s.requireAdmin(ctx); err != nil {
+	creatorID, moduleID, err := s.inviteCreator(ctx)
+	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			return &authv1.CreateInviteResponse{Error: st.Message()}, nil
 		}
@@ -68,7 +76,12 @@ func (s *AuthServer) CreateInvite(ctx context.Context, req *authv1.CreateInviteR
 
 	role := strings.TrimSpace(req.Role)
 	tenantID := strings.TrimSpace(req.TenantId)
-	inv, err := s.store.CreateInvite(s.inviteCreatedBy(ctx), role, tenantID, maxUses, ttl)
+	var inv *authStore.Invite
+	if creatorID != "" {
+		inv, err = s.store.CreateInviteForUser(ctx, creatorID, role, tenantID, maxUses, ttl)
+	} else {
+		inv, err = s.store.CreateInvite(moduleID, role, tenantID, maxUses, ttl)
+	}
 	if err != nil {
 		return &authv1.CreateInviteResponse{Error: err.Error()}, nil
 	}

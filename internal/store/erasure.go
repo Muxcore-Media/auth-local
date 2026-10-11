@@ -339,7 +339,10 @@ func purgeUserRows(ctx context.Context, q sqlExecer, userID, username string) (i
 			return 0, fmt.Errorf("erase user rows: %w", err)
 		}
 	}
-	if username != "" && username != DeletedUserMarker {
+	// The marker is also an allowed real username. It must not exempt an
+	// erased creator from revocation (ADR-0036). Legacy labels still carry no
+	// creator-kind/ID provenance; do not infer ownership of orphaned rows.
+	if username != "" {
 		now := time.Now().UTC().Format(time.RFC3339)
 		if err := exec(`UPDATE invites SET revoked_at = ?
 			WHERE created_by = ? AND revoked_at = '' AND (max_uses = 0 OR use_count < max_uses)`, now, username); err != nil {
