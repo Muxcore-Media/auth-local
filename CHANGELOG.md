@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-11
+
+### Fixed
+- Bind user-created invites to the immutable creator ID and recheck the current admin role in the same write transaction as insertion (ADR-0036, #46). Erasure and username reuse cannot revive an in-flight request's authority. A supplied gRPC bearer takes precedence over module credentials without fallback after rejection; HTTP refuses a failed second user lookup. Erasure also revokes invites for a real user named `deleted-user`, including startup restore with a surviving tombstoned user row.
+
+Legacy limitation: creator labels cannot distinguish equal usernames/module CNs, reused usernames, or orphaned attribution. These cases require operator reconciliation; this release does not infer provenance or broadly purge unresolved invites.
+
 ## [0.1.20] - 2026-10-10
 
 ### Security
