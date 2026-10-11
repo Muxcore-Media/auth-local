@@ -1,8 +1,10 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -74,9 +76,47 @@ func (s *Store) migrateInvites() error {
 	return err
 }
 
-// CreateInvite creates a new invite. maxUses <= 0 means unlimited. ttl must be > 0.
-// tenantID is copied onto users created via RedeemInvite (household tenancy).
+// CreateInvite creates an invite for a trusted module label or a legacy fixture.
+// User-authorized callers must use CreateInviteForUser (ADR-0036).
 func (s *Store) CreateInvite(createdBy, role, tenantID string, maxUses int, ttl time.Duration) (*Invite, error) {
+	return createInvite(context.Background(), s.db, createdBy, role, tenantID, maxUses, ttl)
+}
+
+// CreateInviteForUser checks the authenticated creator's immutable ID and current
+// admin role in the same write transaction as the insert. EraseUser cannot
+// interleave between that check and the write, and username reuse cannot rebind
+// an in-flight request to another account (ADR-0036).
+func (s *Store) CreateInviteForUser(ctx context.Context, creatorID, role, tenantID string, maxUses int, ttl time.Duration) (*Invite, error) {
+	if creatorID == "" {
+		return nil, ErrUserNotFound
+	}
+	var invite *Invite
+	err := s.writeTx(ctx, func(q sqlExecer) error {
+		var username, roles string
+		err := q.QueryRowContext(ctx, `SELECT username, roles FROM users
+			WHERE id = ? AND NOT EXISTS (SELECT 1 FROM user_erasures WHERE user_id = ?)`, creatorID, creatorID).
+			Scan(&username, &roles)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("read invite creator: %w", err)
+		}
+		if !rolesHaveAdmin(roles) {
+			return errors.New("invite creator must currently hold the admin role")
+		}
+		invite, err = createInvite(ctx, q, username, role, tenantID, maxUses, ttl)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return invite, nil
+}
+
+// createInvite keeps the existing grant semantics: empty role defaults to user,
+// maxUses <= 0 means unlimited, and the destination tenant is copied on redeem.
+func createInvite(ctx context.Context, q sqlExecer, createdBy, role, tenantID string, maxUses int, ttl time.Duration) (*Invite, error) {
 	if ttl <= 0 {
 		return nil, fmt.Errorf("ttl must be positive")
 	}
@@ -96,7 +136,7 @@ func (s *Store) CreateInvite(createdBy, role, tenantID string, maxUses int, ttl 
 	id := newID()
 	now := time.Now().UTC()
 	expires := now.Add(ttl)
-	_, err := s.db.Exec(`
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO invites (id, token_hash, prefix, created_by, role, tenant_id, max_uses, use_count, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 	`, id, hash, prefix, createdBy, role, tenantID, maxUses,

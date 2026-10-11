@@ -2,6 +2,7 @@ package webapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,69 @@ type pausedInviteIdentity struct {
 	captured chan *authStore.User
 	resume   chan struct{}
 	once     sync.Once
+}
+
+// changedInviteIdentity runs after the real second lookup has authenticated the
+// creator, so it can invalidate the captured authority before the store write.
+type changedInviteIdentity struct {
+	AdminHTTPGuard
+	afterLookup func(*authStore.User) error
+}
+
+func (g *changedInviteIdentity) HTTPUser(r *http.Request) (*authStore.User, error) {
+	u, err := g.AdminHTTPGuard.HTTPUser(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := g.afterLookup(u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func TestInviteCreationRechecksResolvedAdminAndLookupFailure(t *testing.T) {
+	for _, change := range []string{"demoted-after-resolution", "second-lookup-failure"} {
+		t.Run(change, func(t *testing.T) {
+			h, srv, st := newInviteTestHandler(t)
+			auth := adminAuthHeader(t, st)
+			lookedUp := false
+			var creatorID string
+			h.auth = &changedInviteIdentity{AdminHTTPGuard: srv, afterLookup: func(u *authStore.User) error {
+				lookedUp = true
+				if u == nil || len(u.Roles) != 1 || u.Roles[0] != "admin" {
+					t.Fatal("second lookup did not resolve the current admin")
+				}
+				creatorID = u.ID
+				if change == "second-lookup-failure" {
+					return errors.New("injected second lookup failure")
+				}
+				return st.SetRoles(u.ID, []string{"user"})
+			}}
+			req := httptest.NewRequest(http.MethodPost, "/api/invites", strings.NewReader(`{"role":"viewer","ttlHours":1}`))
+			req.Header.Set("Authorization", auth)
+			rec := httptest.NewRecorder()
+			h.apiInvites(rec, req)
+			if !lookedUp {
+				t.Fatal("request failed before the second authenticated lookup")
+			}
+			wantStatus := http.StatusBadRequest
+			if change == "second-lookup-failure" {
+				wantStatus = http.StatusUnauthorized
+			}
+			if rec.Code != wantStatus {
+				t.Errorf("invalidated creator accepted: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if invites, err := st.ListInvites(); err != nil || len(invites) != 0 {
+				t.Errorf("invalidated creator persisted invites: %+v, %v", invites, err)
+			}
+			if change == "demoted-after-resolution" {
+				u, err := st.GetUser(creatorID)
+				if err != nil || len(u.Roles) != 1 || u.Roles[0] != "user" {
+					t.Errorf("demoted user changed: %+v, %v", u, err)
+				}
+			}
+		})
+	}
 }
 
 func (g *pausedInviteIdentity) HTTPUser(r *http.Request) (*authStore.User, error) {
