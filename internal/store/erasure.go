@@ -329,6 +329,7 @@ func purgeUserRows(ctx context.Context, q sqlExecer, userID, username string) (i
 		return nil
 	}
 	for _, query := range []string{
+		`DELETE FROM account_default_profiles WHERE user_id = ?`,
 		`DELETE FROM sessions WHERE user_id = ?`, // full, partial and api-token
 		`DELETE FROM api_tokens WHERE user_id = ?`,
 		`DELETE FROM webauthn_credentials WHERE user_id = ?`,
@@ -366,9 +367,15 @@ func (s *Store) SweepTombstoned(ctx context.Context) (int64, error) {
 	var total int64
 	err := s.writeTx(ctx, func(q sqlExecer) error {
 		n, err := sweepTombstoned(ctx, q)
+		if err != nil {
+			return err
+		}
 		total = n
-		return err
+		return validateDefaultProfiles(ctx, q)
 	})
+	if err != nil {
+		return 0, err
+	}
 	return total, err
 }
 
@@ -401,7 +408,7 @@ func sweepTombstoned(ctx context.Context, q sqlExecer) (int64, error) {
 		total += n
 	}
 	// Stray rows whose user row is already gone.
-	for _, table := range []string{"sessions", "api_tokens", "webauthn_credentials", "webauthn_sessions", "totp"} {
+	for _, table := range []string{"account_default_profiles", "sessions", "api_tokens", "webauthn_credentials", "webauthn_sessions", "totp"} {
 		res, err := q.ExecContext(ctx, `DELETE FROM `+table+` WHERE user_id IN (SELECT user_id FROM user_erasures)`)
 		if err != nil {
 			return 0, fmt.Errorf("sweep %s: %w", table, err)
@@ -853,8 +860,11 @@ func ImportLedger(ctx context.Context, path string, l *Ledger) (ImportResult, er
 			res.Imported++
 		}
 		n, err := sweepTombstoned(ctx, q)
+		if err != nil {
+			return err
+		}
 		res.Swept = n
-		return err
+		return validateDefaultProfiles(ctx, q)
 	})
 	if err != nil {
 		return ImportResult{}, err

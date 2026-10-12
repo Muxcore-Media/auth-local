@@ -29,6 +29,9 @@ func seedSessionUser(t *testing.T, s *Store, userID string) {
 	if _, err := s.db.Exec(`INSERT INTO users (id, username, password, roles) VALUES (?, ?, 'unused', '["user"]')`, userID, userID); err != nil {
 		t.Fatal(err)
 	}
+	if err := insertDefaultProfile(context.Background(), s.db, userID, newDefaultProfileID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func seedManagedSession(t *testing.T, s *Store, id, userID, kind, created, expires string) {

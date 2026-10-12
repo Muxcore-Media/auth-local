@@ -206,7 +206,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateErasures(); err != nil {
 		return err
 	}
-	return s.migrateSessionIDs()
+	if err := s.migrateSessionIDs(); err != nil {
+		return err
+	}
+	return s.migrateDefaultProfiles(context.Background(), newDefaultProfileID)
 }
 
 func (s *Store) migrateTenantColumns() error {
@@ -256,15 +259,23 @@ func (s *Store) CreateUserTenant(username, password, tenantID string) (*User, er
 		TenantID: tenantID,
 	}
 	rolesJSON, _ := json.Marshal(user.Roles)
-	res, err := s.db.Exec(
-		`INSERT INTO users (id, username, password, roles, tenant_id) SELECT ?, ?, ?, ?, ?`+notErasedClause,
-		id, username, string(hash), string(rolesJSON), tenantID, id,
-	)
+	err = s.writeTx(context.Background(), func(q sqlExecer) error {
+		res, err := q.ExecContext(context.Background(),
+			`INSERT INTO users (id, username, password, roles, tenant_id) SELECT ?, ?, ?, ?, ?`+notErasedClause,
+			id, username, string(hash), string(rolesJSON), tenantID, id,
+		)
+		if err != nil {
+			return fmt.Errorf("create user: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return ErrUserIDErased
+		}
+		return insertDefaultProfile(context.Background(), q, id, newDefaultProfileID)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create user: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, ErrUserIDErased
+		return nil, err
 	}
 	return user, nil
 }
