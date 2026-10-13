@@ -28,12 +28,19 @@ func TestUpgradeFromV0_1_5(t *testing.T) {
 	freshSchema := moduletest.Schema(t, fresh.db)
 
 	path := moduletest.CopyFixture(t, fixture)
+	var profiles map[string]defaultProfileRecord
 	for i := 0; i < 2; i++ { // the second open must be a no-op
 		s, err := New(path)
 		if err != nil {
 			t.Fatalf("open #%d: %v", i+1, err)
 		}
 		checkUpgraded(t, s, freshSchema, i == 0)
+		current := requireDefaultProfiles(t, s)
+		if i == 0 {
+			profiles = current
+		} else if !reflect.DeepEqual(profiles, current) {
+			t.Fatal("second v0.1.5 upgrade replaced default profiles")
+		}
 		if err := s.Close(); err != nil {
 			t.Fatalf("close #%d: %v", i+1, err)
 		}
@@ -203,7 +210,7 @@ func checkUpgraded(t *testing.T, s *Store, freshSchema moduletest.SchemaInfo, fi
 // (testdata/upgrade/seed_v0.1.19_upgrade_test.go.txt).
 const upgradeKeyV0119 = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 
-// TestUpgradeFromV0_1_19 opens the snapshot produced by the latest release,
+// TestUpgradeFromV0_1_19 opens the historical snapshot produced by release
 // v0.1.19 (no session_id column, no erasure ledger), with the current code
 // twice, then erases a user on the upgraded database and reopens it
 // (ADR-0015, ADR-0035).
@@ -221,6 +228,7 @@ func TestUpgradeFromV0_1_19(t *testing.T) {
 
 	path := moduletest.CopyFixture(t, "testdata/upgrade/v0.1.19.db")
 	ctx := context.Background()
+	var profiles map[string]defaultProfileRecord
 	for i := 0; i < 2; i++ {
 		s, err := NewWithKey(path, key)
 		if err != nil {
@@ -228,6 +236,12 @@ func TestUpgradeFromV0_1_19(t *testing.T) {
 		}
 		moduletest.RequireSchemaSuperset(t, moduletest.Schema(t, s.db), freshSchema)
 		moduletest.RequireIntegrity(t, s.db)
+		current := requireDefaultProfiles(t, s)
+		if i == 0 {
+			profiles = current
+		} else if !reflect.DeepEqual(profiles, current) {
+			t.Fatal("second v0.1.19 upgrade replaced default profiles")
+		}
 		users, err := s.ListUsers()
 		if err != nil || len(users) != 5 {
 			t.Fatalf("ListUsers = %d, %v; want 5", len(users), err)

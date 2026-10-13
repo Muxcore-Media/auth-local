@@ -35,6 +35,7 @@ func userRowCounts(t *testing.T, s *Store, userID string) map[string]int {
 	for table, col := range map[string]string{
 		"users": "id", "sessions": "user_id", "api_tokens": "user_id", "webauthn_credentials": "user_id",
 		"webauthn_sessions": "user_id", "totp": "user_id",
+		"account_default_profiles": "user_id",
 	} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE `+col+` = ?`, userID).Scan(&n); err != nil {
@@ -659,6 +660,7 @@ func TestLedgerExportImportRoundTrip(t *testing.T) {
 	victim, _ := s.CreateUser("victim", "pw")
 	seedUser(t, s, victim)
 	// The pre-deletion "archive": a copy of the database taken now.
+	profilesBeforeBackup := requireDefaultProfiles(t, s)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -707,6 +709,9 @@ func TestLedgerExportImportRoundTrip(t *testing.T) {
 	requireNoUserRows(t, s, victim.ID)
 	if _, err := s.GetUser(admin.ID); err != nil {
 		t.Fatal("bystander lost in restore")
+	}
+	if got := requireDefaultProfiles(t, s)[admin.ID]; got != profilesBeforeBackup[admin.ID] {
+		t.Fatal("restore and ledger reconciliation replaced surviving profile ID")
 	}
 	if id, err := s.EraseUser(ctx, admin.ID, "", victim.ID); err != nil || id != erasureID {
 		t.Fatalf("erasure after restore = %q, %v; want the original %q", id, err, erasureID)

@@ -189,6 +189,36 @@ roles and tenant, including empty roles/tenant after a claims change. The lookup
 does not read password hashes or decrypt TOTP secrets. Only definitively expired
 sessions receive best-effort lazy cleanup; unreadable records are preserved.
 
+### Dormant default-profile mapping (ADR-0040)
+
+Auth-local reserves one random default-profile ID per account in the internal
+`account_default_profiles` table. IDs contain 128 bits of checked cryptographic
+randomness encoded as 32 lowercase hexadecimal characters; mapping timestamps
+use canonical UTC RFC3339Nano. These rows do not enable household profiles:
+account APIs, claims, sessions, permissions and userdata remain unchanged.
+
+The first migration creates and backfills the table transactionally, excluding
+tombstoned accounts. Account creation and invite redemption write the mapping
+in their account transaction. Later opens never regenerate missing mappings.
+Startup sweeps tombstoned mappings, including rows whose account is gone, then
+validates all remaining mappings in the same transaction. Missing live mappings,
+invalid IDs/timestamps or unknown orphan mappings refuse startup without
+committing the sweep. Offline ledger import also validates before its merge and
+sweep commit; its preceding schema migrations can persist if import is refused.
+
+Backups that contain mappings preserve their IDs. Table absence is the initial
+migration marker: a pre-feature restore or total loss of this table can mint
+new IDs while this feature is dormant. Active viewer authority requires a
+separate identity-preserving restore design. Writable downgrade is unsupported:
+old binaries do not maintain this table. Roll back by restoring a compatible
+backup, not by opening the migrated database with an old writer.
+
+Focused mapping checks run with
+`go test -race -count=1 ./internal/store -run 'TestDefaultProfile|TestUpgrade'`;
+`make test` remains the full module gate. The current candidate still requires a
+genuine v0.1.21 upgrade snapshot and verified previous-train coverage before
+source acceptance or release; historical snapshots do not replace those gates.
+
 ### User erasure (ADR-0035)
 
 `DeleteUser` (gRPC) and `DELETE /api/users/{id}` (HTTP) erase a user. Both

@@ -244,6 +244,9 @@ func (s *Store) RedeemInvite(rawToken, username, password string) (*User, *Invit
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, nil, ErrUserIDErased
 	}
+	if err := insertDefaultProfile(context.Background(), tx, userID, newDefaultProfileID); err != nil {
+		return nil, nil, err
+	}
 	_, err = tx.Exec(`UPDATE invites SET use_count = use_count + 1 WHERE id = ?`, inv.ID)
 	if err != nil {
 		return nil, nil, err
